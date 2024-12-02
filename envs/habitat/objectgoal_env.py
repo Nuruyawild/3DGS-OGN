@@ -70,10 +70,14 @@ class ObjectGoal_Env(habitat.RLEnv):
         self.path_length = None
         self.last_sim_location = None
         self.trajectory_states = []
-        self.info = {}
-        self.info['distance_to_goal'] = None
-        self.info['spl'] = None
-        self.info['success'] = None
+        self.info = {
+            'distance_to_goal': 5.0,
+            'prev_distance': 5.0,
+            'spl': 0.0,
+            'success': False,
+            'time': 0,
+            'sensor_pose': [0.0, 0.0, 0.0]
+        }
 
     def load_new_episode(self):
         """The function loads a fixed episode from the episode dataset. This

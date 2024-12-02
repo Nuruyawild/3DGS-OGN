@@ -111,7 +111,7 @@ def get_args():
                         help='use generalized advantage estimation')
     parser.add_argument('--tau', type=float, default=0.95,
                         help='gae parameter (default: 0.95)')
-    parser.add_argument('--entropy_coef', type=float, default=0.001,
+    parser.add_argument('--entropy_coef', type=float, default=0.01,
                         help='entropy term coefficient (default: 0.01)')
     parser.add_argument('--value_loss_coef', type=float, default=0.5,
                         help='value loss coefficient (default: 0.5)')
@@ -148,6 +148,21 @@ def get_args():
     parser.add_argument('--map_pred_threshold', type=float, default=1.0)
     parser.add_argument('--exp_pred_threshold', type=float, default=1.0)
     parser.add_argument('--collision_threshold', type=float, default=0.20)
+
+    parser.add_argument('--success_reward', type=float, default=2.0,
+                    help='reward for successfully reaching the goal')
+    parser.add_argument('--distance_reward_scale', type=float, default=0.01,
+                        help='scale for distance-based reward')
+    parser.add_argument('--exploration_reward_scale', type=float, default=0.1,
+                        help='scale for exploration reward')
+    
+    parser.add_argument('--entropy_decay', type=float, default=0.995,
+                        help='entropy coefficient decay rate')
+    parser.add_argument('--l2_reg', type=float, default=0.01,
+                        help='L2 regularization coefficient')
+    parser.add_argument('--kl_target', type=float, default=0.02,
+                        help='target KL divergence threshold')
+
 
     # parse arguments
     args = parser.parse_args()

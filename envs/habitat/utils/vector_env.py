@@ -374,14 +374,21 @@ class VectorEnv:
         for write_fn, args in zip(self._connection_write_fns, data):
             write_fn((STEP_COMMAND, args))
 
-    def step_wait(self) -> List[Observations]:
-        r"""Wait until all the asynchronized environments have synchronized.
-        """
+    def step_wait(self):
         results = []
-        for read_fn in self._connection_read_fns:
-            results.append(read_fn())
+        for i, read_fn in enumerate(self._connection_read_fns):
+            obs, reward, done, info = read_fn()
+            
+            # 确保distance_to_goal存在
+            if info.get('distance_to_goal') is None:
+                print(f"Warning: Missing distance in env {i}, using default")
+                info['distance_to_goal'] = 5.0
+            
+            results.append((obs, reward, done, info))
+        
         self._is_waiting = False
         obs, rews, dones, infos = zip(*results)
+        
         return np.stack(obs), np.stack(rews), np.stack(dones), infos
 
     def step(self, data: List[Union[int, str, Dict[str, Any]]]) -> List[Any]:

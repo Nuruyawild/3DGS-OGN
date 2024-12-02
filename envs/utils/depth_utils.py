@@ -143,14 +143,17 @@ def get_point_cloud_from_z_t(Y_t, camera_matrix, device, scale=1):
     grid_z = grid_z.transpose(1, 0).to(device)
     grid_x = grid_x.unsqueeze(0).expand(Y_t.size())
     grid_z = grid_z.unsqueeze(0).expand(Y_t.size())
-
+    # 计算3D坐标
     X_t = (grid_x[:, ::scale, ::scale] - camera_matrix.xc) * \
         Y_t[:, ::scale, ::scale] / camera_matrix.f
     Z_t = (grid_z[:, ::scale, ::scale] - camera_matrix.zc) * \
         Y_t[:, ::scale, ::scale] / camera_matrix.f
-
+    
     XYZ = torch.stack(
         (X_t, Y_t[:, ::scale, ::scale], Z_t), dim=len(Y_t.size()))
+    bs = Y_t.size(0)  # 获取批量大小
+    rows, cols = Y_t.size(-2), Y_t.size(-1)  # 获取行和列的大小
+    XYZ = XYZ.reshape(bs, rows * cols, 3)
 
     return XYZ
 

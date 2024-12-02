@@ -1,0 +1,19 @@
+python main.py --auto_gpu_config 0 -n 12 --num_processes_per_gpu 6 -d saved/ --exp_name exp2 --save_periodic 500000
+如果要指定gpu 前面加CUDA_VISIBLE_DEVICES=1
+
+python main.py --split val --eval 1 --auto_gpu_config 0 -n 5 --num_processes_per_gpu 4 --load saved/models/exp1/model_best.pth --print_images 1 -d results/ --exp_name exp1
+
+TensorBoard:
+lsof -i :6006
+kill -9 2644572
+tensorboard --logdir=./saved/models/exp2/tensorboard
+
+Git:
+git pull origin main
+
+git add .
+git remote add origin https://github.com/Nuruyawild/3DGS-OGN.git
+git push -u origin main
+
+rm -rf saved/dump/exp2
+rm -rf saved/models/exp2

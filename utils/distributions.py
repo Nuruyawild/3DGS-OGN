@@ -59,3 +59,7 @@ class DiagGaussian(nn.Module):
 
         action_logstd = self.logstd(zeros)
         return FixedNormal(action_mean, action_logstd.exp())
+    
+    def log_probs(self, actions):
+        # 确保 actions 的形状正确
+        return self.forward(self, actions).log_probs(actions)

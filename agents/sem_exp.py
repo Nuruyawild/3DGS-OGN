@@ -118,21 +118,32 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env):
             self._visualize(planner_inputs)
 
         if action >= 0:
-
+            # 保存当前距离作为上一步距离
+            if 'distance_to_goal' in self.info:
+                self.info['prev_distance'] = self.info['distance_to_goal']
+            
             # act
             action = {'action': action}
             obs, rew, done, info = super().step(action)
+            
+            # 确保距离信息存在
+            if 'distance_to_goal' not in info:
+                info['distance_to_goal'] = self.info.get('prev_distance', 5.0)
+            if 'prev_distance' not in info:
+                info['prev_distance'] = info['distance_to_goal']
+            if 'spl' not in info:
+                info['spl'] = 0.0
+            if 'success' not in info:
+                info['success'] = False
 
             # preprocess obs
-            obs = self._preprocess_obs(obs) 
+            obs = self._preprocess_obs(obs)
             self.last_action = action['action']
             self.obs = obs
             self.info = info
-
             info['g_reward'] += rew
 
             return obs, rew, done, info
-
         else:
             self.last_action = None
             self.info["sensor_pose"] = [0., 0., 0.]

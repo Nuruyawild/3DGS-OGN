@@ -12,8 +12,8 @@ Git:
 git pull origin main
 
 git add .
+git commit -m "Implementing 3dgs"
 git remote add origin https://github.com/Nuruyawild/3DGS-OGN.git
 git push -u origin main
 
-rm -rf saved/dump/exp2
-rm -rf saved/models/exp2
+rm -rf saved/dump/exp2;rm -rf saved/models/exp2;

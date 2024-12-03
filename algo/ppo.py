@@ -11,73 +11,77 @@ from utils.distributions import Categorical, DiagGaussian
 
 
 class AdaptiveLRScheduler:
-    def __init__(self, optimizer, patience=5, min_lr=1e-6, factor=0.5):
+    def __init__(self, optimizer, metric_patience, min_lr=1e-6, factor=0.5, verbose=True):
+        """
+        参数：
+        - optimizer: 优化器
+        - metric_patience: 字典，包含每个指标的耐心值，例如：
+            {
+                'value_loss': 5,
+                'action_loss': 5,
+                'dist_entropy': 5,
+                'avg_spl': 10,
+                'avg_success': 10,
+                'avg_dist': 10
+            }
+        - min_lr: 最小学习率
+        - factor: 学习率缩减因子
+        - verbose: 是否打印日志
+        """
         self.optimizer = optimizer
-        self.patience = patience
         self.min_lr = min_lr
         self.factor = factor
+        self.verbose = verbose
         
-        # 初始化监控指标的最佳值和计数器
-        self.best_loss = float('inf')
-        self.best_spl = float('-inf') 
-        self.best_success = float('-inf')
+        self.metric_names = list(metric_patience.keys())
+        self.patience = metric_patience
+        self.best_metrics = {name: None for name in self.metric_names}
+        self.counters = {name: 0 for name in self.metric_names}
+        self.monitor_op = {
+            'value_loss': lambda current, best: current < best,
+            'action_loss': lambda current, best: current < best,
+            'dist_entropy': lambda current, best: current > best,
+            'avg_spl': lambda current, best: current > best,
+            'avg_success': lambda current, best: current > best,
+            'avg_dist': lambda current, best: current < best
+        }
         
-        self.loss_counter = 0
-        self.spl_counter = 0
-        self.success_counter = 0
-        
-    def step(self, metrics):
-        current_lr = self.optimizer.param_groups[0]['lr']
+    def step(self, metrics: dict):
         should_reduce = False
+        for name in self.metric_names:
+            if name not in metrics:
+                continue  # 如果当前指标未提供，跳过
+            current_value = metrics[name]
+            
+            if self.best_metrics[name] is None:
+                self.best_metrics[name] = current_value
+                continue  # 初始化最佳值，跳过本次循环
+            
+            # 根据指标类型选择比较操作
+            if self.monitor_op[name](current_value, self.best_metrics[name]):
+                # 指标有改善
+                self.best_metrics[name] = current_value
+                self.counters[name] = 0
+            else:
+                # 指标无改善
+                self.counters[name] += 1
+                if self.counters[name] >= self.patience[name]:
+                    should_reduce = True
+                    self.counters[name] = 0
+                    if self.verbose:
+                        print(f'指标 {name} 在 {self.patience[name]} 个 epoch 内未改善，准备调整学习率。')
         
-        # 监控 loss
-        if 'loss' in metrics:
-            if metrics['loss'] >= self.best_loss:
-                self.loss_counter += 1
-                if self.loss_counter >= self.patience:
-                    should_reduce = True
-                    self.loss_counter = 0
-            else:
-                self.best_loss = metrics['loss']
-                self.loss_counter = 0
-                
-        # 监控 SPL
-        if 'spl' in metrics:
-            if metrics['spl'] <= self.best_spl:
-                self.spl_counter += 1
-                if self.spl_counter >= self.patience:
-                    should_reduce = True
-                    self.spl_counter = 0
-            else:
-                self.best_spl = metrics['spl']
-                self.spl_counter = 0
-                
-        # 监控 success rate
-        if 'success' in metrics:
-            if metrics['success'] <= self.best_success:
-                self.success_counter += 1
-                if self.success_counter >= self.patience:
-                    should_reduce = True
-                    self.success_counter = 0
-            else:
-                self.best_success = metrics['success']
-                self.success_counter = 0
-                
-        # 如果需要降低学习率
         if should_reduce:
-            new_lr = max(current_lr * self.factor, self.min_lr)
-            if new_lr != current_lr:
-                for param_group in self.optimizer.param_groups:
-                    param_group['lr'] = new_lr
-                print(f'Reducing learning rate from {current_lr:.6f} to {new_lr:.6f}')
+            self._reduce_lr()
             
     def _reduce_lr(self):
         for param_group in self.optimizer.param_groups:
             old_lr = param_group['lr']
             new_lr = max(old_lr * self.factor, self.min_lr)
-            param_group['lr'] = new_lr
-            if self.verbose:
-                print(f'Reducing learning rate from {old_lr:.6f} to {new_lr:.6f}')
+            if old_lr > new_lr:
+                param_group['lr'] = new_lr
+                if self.verbose:
+                    print(f'学习率从 {old_lr:.6f} 降低到 {new_lr:.6f}')
 
 
 class PPO:
@@ -97,11 +101,20 @@ class PPO:
         self.optimizer = optim.Adam(actor_critic.parameters(), lr=lr, eps=eps)
         
         # 添加学习率调度器
+        metric_patience = {
+            'value_loss': 5,
+            'action_loss': 5,
+            'dist_entropy': 5,
+            'avg_spl': 10,
+            'avg_success': 10,
+            'avg_dist': 10
+        }
         self.scheduler = AdaptiveLRScheduler(
             self.optimizer,
-            patience=5,
+            metric_patience=metric_patience,
             min_lr=1e-6,
-            factor=0.5
+            factor=0.5,
+            verbose=True
         )
 
 
@@ -195,15 +208,29 @@ class PPO:
         action_loss_epoch /= num_updates
         dist_entropy_epoch /= num_updates
 
-                # 在更新后调整学习率
+        # 计算平均值
+        avg_value_loss = value_loss_epoch / num_updates
+        avg_action_loss = action_loss_epoch / num_updates
+        avg_dist_entropy = dist_entropy_epoch / num_updates
+        
+        # 准备指标字典
+        scheduler_metrics = {
+            'value_loss': avg_value_loss,
+            'action_loss': avg_action_loss,
+            'dist_entropy': avg_dist_entropy
+        }
+        
+        # 如果提供了其他指标，添加到字典中
         if metrics is not None:
-            current_metrics = {
-                'loss': value_loss_epoch + action_loss_epoch,
-                'spl': metrics.get('spl', 0),
-                'success': metrics.get('success', 0)
-            }
-            self.scheduler.step(current_metrics)
-
+            scheduler_metrics.update({
+                'avg_spl': metrics.get('avg_spl', None),
+                'avg_success': metrics.get('avg_success', None),
+                'avg_dist': metrics.get('avg_dist', None)
+            })
+        
+        # 调整学习率
+        self.scheduler.step(scheduler_metrics)
+        
         return value_loss_epoch, action_loss_epoch, dist_entropy_epoch
 
 

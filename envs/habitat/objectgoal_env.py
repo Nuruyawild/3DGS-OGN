@@ -402,6 +402,14 @@ class ObjectGoal_Env(habitat.RLEnv):
         reward = (self.prev_distance - self.curr_distance) * \
             self.args.reward_coeff
 
+        # 计算指标
+        spl, success, dist = self.get_metrics()
+
+        # 将指标存储在 self.info 中
+        self.info['spl'] = spl
+        self.info['success'] = success
+        self.info['dist'] = dist
+
         self.prev_distance = self.curr_distance
         return reward
 

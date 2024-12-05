@@ -87,7 +87,8 @@ class AdaptiveLRScheduler:
 class PPO:
     def __init__(self, actor_critic, clip_param, ppo_epoch, num_mini_batch,
                  value_loss_coef, entropy_coef, lr=None, eps=None,
-                 max_grad_norm=None, use_clipped_value_loss=True):
+                 max_grad_norm=None, use_clipped_value_loss=True,
+                 use_reward_norm=False, use_reward_scaling=False):
         
         self.actor_critic = actor_critic
         self.clip_param = clip_param
@@ -97,6 +98,8 @@ class PPO:
         self.entropy_coef = entropy_coef
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
+        self.use_reward_norm = use_reward_norm
+        self.use_reward_scaling = use_reward_scaling
 
         self.optimizer = optim.Adam(actor_critic.parameters(), lr=lr, eps=eps)
         
@@ -117,8 +120,28 @@ class PPO:
             verbose=True
         )
 
+        # Orthogonal initialization
+        for m in self.actor_critic.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.orthogonal_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def normalize_rewards(self, rewards):
+        if self.use_reward_norm:
+            rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-5)
+        return rewards
+
+    def scale_rewards(self, rewards, scale_factor=0.1):
+        if self.use_reward_scaling:
+            rewards = rewards * scale_factor
+        return rewards
 
     def update(self, rollouts, metrics=None):
+        # Normalize and scale rewards
+        rollouts.rewards = self.normalize_rewards(rollouts.rewards)
+        rollouts.rewards = self.scale_rewards(rollouts.rewards)
+
         advantages = rollouts.returns[:-1] - rollouts.value_preds[:-1]
         advantages = (advantages - advantages.mean()) / (
             advantages.std() + 1e-5)

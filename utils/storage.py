@@ -72,19 +72,19 @@ class RolloutStorage(object):
                 self.returns[step] = self.returns[step + 1] * gamma \
                     * self.masks[step + 1] + self.rewards[step]
 
-    def feed_forward_generator(self, advantages, num_mini_batch):
+    def feed_forward_generator(self, advantages, mini_batch_size):
 
 
         num_steps, num_processes = self.rewards.size()[0:2]
         batch_size = num_processes * num_steps
-        mini_batch_size = batch_size // num_mini_batch
-        assert batch_size >= num_mini_batch, (
+        mini_batch_size = batch_size // mini_batch_size
+        assert batch_size >= mini_batch_size, (
             "PPO requires the number of processes ({}) "
             "* number of steps ({}) = {} "
             "to be greater than or equal to "
             "the number of PPO mini batches ({})."
             "".format(num_processes, num_steps, num_processes * num_steps,
-                      num_mini_batch))
+                      mini_batch_size))
 
         sampler = BatchSampler(SubsetRandomSampler(range(batch_size)),
                                mini_batch_size, drop_last=False)
@@ -103,15 +103,15 @@ class RolloutStorage(object):
                 if self.has_extras else None,
             }
 
-    def recurrent_generator(self, advantages, num_mini_batch):
+    def recurrent_generator(self, advantages, mini_batch_size):
 
 
         num_processes = self.rewards.size(1)
-        assert num_processes >= num_mini_batch, (
+        assert num_processes >= mini_batch_size, (
             "PPO requires the number of processes ({}) "
             "to be greater than or equal to the number of "
-            "PPO mini batches ({}).".format(num_processes, num_mini_batch))
-        num_envs_per_batch = num_processes // num_mini_batch
+            "PPO mini batches ({}).".format(num_processes, mini_batch_size))
+        num_envs_per_batch = num_processes // mini_batch_size
         perm = torch.randperm(num_processes)
         T, N = self.num_steps, num_envs_per_batch
 

@@ -1,1 +1,1 @@
-from .ppo import PPO
+from .ppo_discrete import PPO_discrete

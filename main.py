@@ -15,7 +15,7 @@ from utils.storage import GlobalRolloutStorage
 from envs import make_vec_envs
 from arguments import get_args
 import algo
-from algo.ppo import PPOWithAttention
+from algo.ppo_discrete import PPO_discrete
 
 os.environ["OMP_NUM_THREADS"] = "1"
 
@@ -91,6 +91,10 @@ def main():
     torch.set_num_threads(1)
     envs = make_vec_envs(args)
     obs, infos = envs.reset()
+
+    # 从环境中获取 observation_space 和 action_space
+    args.observation_space = envs.observation_space
+    args.action_space = envs.action_space
 
     # 确保所有环境都有初始距离值
     for env_idx in range(num_scenes):
@@ -290,33 +294,29 @@ def main():
                                       }).to(device)
     
     # g_agent = algo.PPO(g_policy, args.clip_param, args.ppo_epoch,
-    #                    args.num_mini_batch, args.value_loss_coef,
+    #                    args.mini_batch_size, args.value_loss_coef,
     #                    args.entropy_coef, lr=args.lr, eps=args.eps,
     #                    max_grad_norm=args.max_grad_norm)
     
-    g_actor_critic = PPOWithAttention(
-        observation_space=g_observation_space,
-        action_space=g_action_space,
-        hidden_size=args.global_hidden_size,
-        num_attention_layers=6
+    # 全局策略观测空间和动作空间的维度
+    state_dim = np.prod(g_observation_space.shape)  # 将观测空间展平
+    action_dim = g_action_space.shape[0]  # 动作空间维度
+
+    # 初始化 PPO_discrete 策略
+    g_actor_critic = PPO_discrete(
+        args,  # 直接传入 args 对象
+        state_dim=np.prod(g_observation_space.shape),  # 观测空间展平后的维度
+        action_dim=g_action_space.shape[0]  # 连续动作空间的维度
     )
+    # 如果需要，可以设置最大动作值
+    args.max_action = float(g_action_space.high[0])
 
     # 将模型移动到 GPU
     if args.cuda:
         g_actor_critic.cuda()
 
     # 初始化 PPO 优化器
-    g_agent = algo.PPO(
-        actor_critic=g_actor_critic,
-        clip_param=args.clip_param,
-        ppo_epoch=args.ppo_epoch,
-        num_mini_batch=args.num_mini_batch,
-        value_loss_coef=args.value_loss_coef,
-        entropy_coef=args.entropy_coef,
-        lr=args.lr,
-        eps=args.eps,
-        max_grad_norm=args.max_grad_norm
-    )
+    g_agent = g_actor_critic
 
     global_input = torch.zeros(num_scenes, ngc, local_w, local_h)
     global_orientation = torch.zeros(num_scenes, 1).long()
@@ -594,9 +594,6 @@ def main():
                 g_rollouts.obs[0].copy_(global_input)
                 g_rollouts.extras[0].copy_(extras)
             else:
-                print("Debug: Inserting into GlobalRolloutStorage")
-                print(f"  g_value shape: {g_value.shape}")
-                print(f"  g_value: {g_value}")
                 g_rollouts.insert(
                     global_input, g_rec_states,
                     g_action, g_action_log_prob, g_value.unsqueeze(-1),
@@ -682,8 +679,11 @@ def main():
                     'success': np.mean(episode_success) if len(episode_success) > 0 else 0,
                 }
 
+                # 准备 ReplayBuffer
+                g_agent.prepare_buffer_from_rollouts(g_rollouts)
+
                 # 计算当前的 value loss 和 action loss
-                g_value_loss, g_action_loss, g_dist_entropy = g_agent.update(g_rollouts, metrics)
+                g_value_loss, g_action_loss, g_dist_entropy = g_agent.update(total_steps=total_steps)
 
                 # 更新 losses 队列
                 g_value_losses.append(g_value_loss)

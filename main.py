@@ -231,7 +231,7 @@ def main():
     def update_intrinsic_rew(e):
         # 确保距离值存在且有效
         if 'distance_to_goal' not in infos[e]:
-            infos[e]['distance_to_goal'] = 5.0
+            infos[e]['distance_to_goal'] = 5.0  # 设置默认最大距离
         if 'prev_distance' not in infos[e]:
             infos[e]['prev_distance'] = infos[e]['distance_to_goal']
         
@@ -263,6 +263,12 @@ def main():
             success_reward
         ) * (args.map_resolution / 100.)**2
         
+        print(f"\nDebug Rewards (env {e}):")
+        print(f"  Progress Reward: {progress_reward:.4f}")
+        print(f"  Area Reward: {area_reward:.4f}")
+        print(f"  Success Reward: {success_reward:.4f}")
+        print(f"  Total Intrinsic: {intrinsic_rews[e]:.4f}")
+        print(f"  Distance Change: {prev_distance:.4f} -> {current_distance:.4f}")
 
     init_map_and_pose()
 
@@ -447,26 +453,34 @@ def main():
                                      for x in done]).to(device)
         g_masks *= l_masks
 
-        for e, x in enumerate(done):
+        for env_idx, x in enumerate(done):
             if x:
-                spl = infos[e]['spl']
-                success = infos[e]['success']
-                dist = infos[e]['distance_to_goal']
-                spl_per_category[infos[e]['goal_name']].append(spl)
-                success_per_category[infos[e]['goal_name']].append(success)
-                if args.eval:
-                    episode_success[e].append(success)
-                    episode_spl[e].append(spl)
-                    episode_dist[e].append(dist)
-                    if len(episode_success[e]) == num_episodes:
-                        finished[e] = 1
-                else:
-                    episode_success.append(success)
-                    episode_spl.append(spl)
-                    episode_dist.append(dist)
-                wait_env[e] = 1.
-                update_intrinsic_rew(e)
-                init_map_and_pose_for_env(e)
+                spl = infos[env_idx]['spl']
+                success = infos[env_idx]['success']
+                dist = infos[env_idx]['distance_to_goal']
+                
+                if not args.eval:
+                    episode_success.append(float(success))
+                    episode_spl.append(float(spl))
+                    episode_dist.append(float(dist))
+                    
+                    window_size = 50
+                    if len(episode_dist) >= window_size:
+                        recent_spl = list(episode_spl)[-window_size:]
+                        recent_success = list(episode_success)[-window_size:]
+                        recent_dist = list(episode_dist)[-window_size:]
+                        
+                        print(f"\nRecent {window_size} Episodes Stats:")
+                        print(f"  Avg SPL: {np.mean(recent_spl):.4f}")
+                        print(f"  Avg Success: {np.mean(recent_success):.4f}")
+                        print(f"  Avg Distance: {np.mean(recent_dist):.4f}")
+                        print(f"  Min Distance: {np.min(recent_dist):.4f}")
+                        print(f"  Max Distance: {np.max(recent_dist):.4f}")
+                        print(f"  Distance Std: {np.std(recent_dist):.4f}")
+
+                wait_env[env_idx] = 1.
+                update_intrinsic_rew(env_idx)
+                init_map_and_pose_for_env(env_idx)
         # ------------------------------------------------------------------
 
         # ------------------------------------------------------------------

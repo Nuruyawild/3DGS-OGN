@@ -7,6 +7,7 @@ import gym
 import argparse
 from .normalization import Normalization, RewardScaling
 from .replaybuffer import ReplayBuffer
+import traceback
 
 from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 from torch.distributions import Beta, Normal
@@ -204,8 +205,8 @@ class PPO_discrete():
         self.max_train_steps = getattr(args, 'max_train_steps', int(3e6))
         
         # 学习率
-        self.lr_a = getattr(args, 'lr_a', 3e-4)
-        self.lr_c = getattr(args, 'lr_c', 3e-4)
+        self.lr_a = getattr(args, 'lr_a', 1e-4)
+        self.lr_c = getattr(args, 'lr_c', 1e-4)
         
         # PPO 超参数
         self.gamma = getattr(args, 'gamma', 0.99)
@@ -325,152 +326,135 @@ class PPO_discrete():
 
     def update(self, total_steps):
         try:
-            # 获取所有数据
+            # 获取数据并移动到正确的设备
             s, a, a_log_p, r, s_, done, v = self.replay_buffer.numpy_to_tensor()
-            print("\n=== Starting Update ===")
-            print("Initial Data Shapes:")
-            print(f"  states: {s.shape}")
-            print(f"  actions: {a.shape}")
-            print(f"  action_log_probs: {a_log_p.shape}")
-            print(f"  rewards: {r.shape}")
-            print(f"  next_states: {s_.shape}")
-            print(f"  done: {done.shape}")
-            print(f"  values: {v.shape}")
-            
-            # 确保所有数据都在同一设备上
             device = next(self.actor.parameters()).device
-            print(f"\nMoving data to device: {device}")
-            s = s.to(device)
-            a = a.to(device)
-            a_log_p = a_log_p.to(device)
-            r = r.to(device)
-            s_ = s_.to(device)
-            done = done.to(device)
-            v = v.to(device)
+            s, a, a_log_p = s.to(device), a.to(device), a_log_p.to(device)
+            r, s_, done, v = r.to(device), s_.to(device), done.to(device), v.to(device)
 
             # 计算 GAE
             print("\nCalculating GAE...")
-            adv = []
+            advantages = []
             gae = 0
             with torch.no_grad():
                 # 获取下一个状态的价值
-                v_ = self.critic(s_)  # 保持原始维度 [64, 1]
-                print(f"  v_ shape: {v_.shape}")
+                next_values = self.critic(s_)  # [64, 1]
                 
                 # 计算 delta，确保所有张量维度一致
-                delta = r + self.gamma * v_ * (1 - done) - v  # 所有输入都是 [64, 1]
-                print(f"  delta shape: {delta.shape}")
+                deltas = r + self.gamma * next_values * (1 - done) - v  # [64, 1]
                 
                 # 计算 GAE
-                delta = delta.detach().cpu().numpy()  # 转换为 numpy 方便处理
-                for t in range(len(delta) - 1, -1, -1):
-                    gae = delta[t] + self.gamma * self.lamda * gae
-                    adv.insert(0, gae)
+                deltas = deltas.detach().cpu().numpy()
+                for t in range(len(deltas) - 1, -1, -1):
+                    gae = deltas[t] + self.gamma * self.lamda * gae
+                    advantages.insert(0, gae)
                 
-                # 转换回 tensor
-                adv = torch.FloatTensor(adv).to(device)  # [64, 1]
-                print(f"  adv shape before reshape: {adv.shape}")
-                
-                # 确保维度正确
-                if len(adv.shape) == 1:
-                    adv = adv.unsqueeze(-1)  # 如果需要，添加维度变成 [64, 1]
-                print(f"  adv shape after reshape: {adv.shape}")
+                # 转换回 tensor 并规范化
+                advantages = torch.FloatTensor(advantages).to(device)  # [64, 1]
+                if len(advantages.shape) == 1:
+                    advantages = advantages.unsqueeze(-1)
                 
                 # 计算目标值
-                v_target = adv + v  # 现在两者都是 [64, 1]
-                print(f"  v_target shape: {v_target.shape}")
+                returns = advantages + v  # [64, 1]
                 
+                # 规范化优势
                 if self.use_adv_norm:
-                    adv = (adv - adv.mean()) / (adv.std() + 1e-8)
-                    print(f"  normalized adv shape: {adv.shape}")
+                    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+                # 打印统计信息
+                print(f"\nValue Statistics:")
+                print(f"  Returns mean: {returns.mean():.4f}, std: {returns.std():.4f}")
+                print(f"  Values mean: {v.mean():.4f}, std: {v.std():.4f}")
+                print(f"  Advantages mean: {advantages.mean():.4f}, std: {advantages.std():.4f}")
 
             # 开始多次训练
-            print(f"\nStarting {self.K_epochs} training epochs...")
+            value_losses = []
+            action_losses = []
+            dist_entropies = []
+            
             for epoch in range(self.K_epochs):
-                print(f"\nEpoch {epoch + 1}/{self.K_epochs}")
-                batch_size = len(s)
-                index = torch.randperm(batch_size)
+                batch_size = s.size(0)
+                # 生成随机索引
+                indices = torch.randperm(batch_size)
                 
                 # 分批处理
                 for start in range(0, batch_size, self.mini_batch_size):
                     end = min(start + self.mini_batch_size, batch_size)
-                    idx = index[start:end]
+                    mb_indices = indices[start:end]
                     
-                    # 获取当前批次数据
-                    s_batch = s[idx]
-                    a_batch = a[idx]
-                    a_log_p_batch = a_log_p[idx]
-                    adv_batch = adv[idx]
-                    v_target_batch = v_target[idx]
+                    # 获取小批量数据
+                    state_batch = s[mb_indices]
+                    action_batch = a[mb_indices]
+                    old_log_prob_batch = a_log_p[mb_indices]
+                    advantage_batch = advantages[mb_indices]
+                    return_batch = returns[mb_indices]
                     
-                    print(f"\nBatch {start//self.mini_batch_size + 1} shapes:")
-                    print(f"  s_batch: {s_batch.shape}")
-                    print(f"  a_batch: {a_batch.shape}")
-                    print(f"  a_log_p_batch: {a_log_p_batch.shape}")
-                    print(f"  adv_batch: {adv_batch.shape}")
-                    print(f"  v_target_batch: {v_target_batch.shape}")
+                    # Actor loss
+                    dist = self.actor.get_dist(state_batch)
+                    entropy = dist.entropy().mean()
+                    new_log_prob = dist.log_prob(action_batch)
                     
-                    # 计算新的动作分布
-                    dist_now = self.actor.get_dist(s_batch)
-                    dist_entropy = dist_now.entropy().mean()
-                    a_log_p_now = dist_now.log_prob(a_batch)
-                    print(f"  new log_prob shape: {a_log_p_now.shape}")
+                    # 确保维度匹配
+                    if len(new_log_prob.shape) == 1:
+                        new_log_prob = new_log_prob.unsqueeze(-1)
+                    if len(old_log_prob_batch.shape) == 1:
+                        old_log_prob_batch = old_log_prob_batch.unsqueeze(-1)
                     
-                    # 确保 log_prob 维度正确
-                    if len(a_log_p_now.shape) == 1:
-                        a_log_p_now = a_log_p_now.unsqueeze(-1)
-                    if len(a_log_p_batch.shape) == 1:
-                        a_log_p_batch = a_log_p_batch.unsqueeze(-1)
-                    print(f"  adjusted log_prob shapes:")
-                    print(f"    a_log_p_now: {a_log_p_now.shape}")
-                    print(f"    a_log_p_batch: {a_log_p_batch.shape}")
+                    # PPO ratio
+                    ratio = torch.exp(new_log_prob - old_log_prob_batch)
+                    surr1 = ratio * advantage_batch
+                    surr2 = torch.clamp(ratio, 1 - self.epsilon, 1 + self.epsilon) * advantage_batch
+                    actor_loss = -torch.min(surr1, surr2).mean()
                     
-                    # 计算比率和损失
-                    ratio = torch.exp(a_log_p_now - a_log_p_batch)
-                    print(f"  ratio shape: {ratio.shape}")
-                    surr1 = ratio * adv_batch
-                    surr2 = torch.clamp(ratio, 1 - self.epsilon, 1 + self.epsilon) * adv_batch
-                    a_loss = -torch.min(surr1, surr2).mean()
-                    
-                    # 计算 critic loss
-                    v_s = self.critic(s_batch).squeeze(-1)
-                    print(f"  v_s shape: {v_s.shape}")
-                    c_loss = torch.mean(F.mse_loss(v_target_batch, v_s))
+                    # Critic loss
+                    value_pred = self.critic(state_batch)
+                    # 使用 Huber loss 代替 MSE
+                    value_loss = F.smooth_l1_loss(value_pred, return_batch)
                     
                     # 总损失
-                    loss = a_loss - dist_entropy * self.entropy_coef + c_loss
-                    print(f"\nLoss values:")
-                    print(f"  actor_loss: {a_loss.item():.4f}")
-                    print(f"  critic_loss: {c_loss.item():.4f}")
-                    print(f"  entropy: {dist_entropy.item():.4f}")
-                    print(f"  total_loss: {loss.item():.4f}")
+                    loss = actor_loss + 0.5 * value_loss - self.entropy_coef * entropy
                     
                     # 更新网络
                     self.optimizer_actor.zero_grad()
                     self.optimizer_critic.zero_grad()
                     loss.backward()
+                    
+                    # 梯度裁剪
                     if self.use_grad_clip:
                         torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
                         torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
+                    
                     self.optimizer_actor.step()
                     self.optimizer_critic.step()
+                    
+                    value_losses.append(value_loss.item())
+                    action_losses.append(actor_loss.item())
+                    dist_entropies.append(entropy.item())
+                    
+                    # 打印每个批次的损失
+                    print(f"\nBatch Losses:")
+                    print(f"  Value Loss: {value_loss.item():.4f}")
+                    print(f"  Actor Loss: {actor_loss.item():.4f}")
+                    print(f"  Entropy: {entropy.item():.4f}")
 
             # Learning rate decay
             if self.use_lr_decay:
-                print("\nPerforming learning rate decay...")
                 self.lr_decay(total_steps)
 
-            print("\n=== Update Complete ===\n")
-            return c_loss.item(), a_loss.item(), dist_entropy.item()
-            
+            # 计算平均损失
+            avg_value_loss = np.mean(value_losses)
+            avg_action_loss = np.mean(action_losses)
+            avg_entropy = np.mean(dist_entropies)
+
+            print(f"\nFinal Average Losses:")
+            print(f"  Value Loss: {avg_value_loss:.4f}")
+            print(f"  Actor Loss: {avg_action_loss:.4f}")
+            print(f"  Entropy: {avg_entropy:.4f}")
+
+            return avg_value_loss, avg_action_loss, avg_entropy
+
         except Exception as e:
             print(f"\nERROR in batch update: {e}")
-            print("Debug info:")
-            print(f"  ReplayBuffer size: {self.replay_buffer.size}")
-            print(f"  Actor device: {next(self.actor.parameters()).device}")
-            print(f"  Critic device: {next(self.critic.parameters()).device}")
-            print("\nStack trace:")
-            import traceback
             traceback.print_exc()
             raise
 

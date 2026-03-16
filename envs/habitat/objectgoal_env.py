@@ -70,14 +70,10 @@ class ObjectGoal_Env(habitat.RLEnv):
         self.path_length = None
         self.last_sim_location = None
         self.trajectory_states = []
-        self.info = {
-            'distance_to_goal': 5.0,
-            'prev_distance': 5.0,
-            'spl': 0.0,
-            'success': False,
-            'time': 0,
-            'sensor_pose': [0.0, 0.0, 0.0]
-        }
+        self.info = {}
+        self.info['distance_to_goal'] = None
+        self.info['spl'] = None
+        self.info['success'] = None
 
     def load_new_episode(self):
         """The function loads a fixed episode from the episode dataset. This
@@ -401,14 +397,6 @@ class ObjectGoal_Env(habitat.RLEnv):
 
         reward = (self.prev_distance - self.curr_distance) * \
             self.args.reward_coeff
-
-        # 计算指标
-        spl, success, dist = self.get_metrics()
-
-        # 将指标存储在 self.info 中
-        self.info['spl'] = spl
-        self.info['success'] = success
-        self.info['dist'] = dist
 
         self.prev_distance = self.curr_distance
         return reward

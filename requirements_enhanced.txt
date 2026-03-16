@@ -1,0 +1,10 @@
+# Base requirements (from original)
+scikit-fmm==2019.1.30
+scikit-learn==0.22.2.post1
+scikit-image==0.15.0
+numpy
+ifcfg
+
+# Enhanced module requirements
+flask>=2.0.0
+Pillow>=8.0.0

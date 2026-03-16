@@ -6,7 +6,6 @@ import numpy as np
 from utils.distributions import Categorical, DiagGaussian
 from utils.model import get_grid, ChannelPool, Flatten, NNBase
 import envs.utils.depth_utils as du
-from algo.gaussian_splatting import GaussianSplatting
 
 
 class Goal_Oriented_Semantic_Policy(NNBase):
@@ -19,14 +18,16 @@ class Goal_Oriented_Semantic_Policy(NNBase):
         out_size = int(input_shape[1] / 16.) * int(input_shape[2] / 16.)
 
         self.main = nn.Sequential(
-            nn.Conv2d(in_channels=1, out_channels=32, kernel_size=3, stride=1, padding=1),
+            nn.MaxPool2d(2),
+            nn.Conv2d(num_sem_categories + 8, 32, 3, stride=1, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=1, padding=1),
+            nn.MaxPool2d(2),
             nn.Conv2d(32, 64, 3, stride=1, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=1, padding=1),
+            nn.MaxPool2d(2),
             nn.Conv2d(64, 128, 3, stride=1, padding=1),
             nn.ReLU(),
+            nn.MaxPool2d(2),
             nn.Conv2d(128, 64, 3, stride=1, padding=1),
             nn.ReLU(),
             nn.Conv2d(64, 32, 3, stride=1, padding=1),
@@ -41,47 +42,14 @@ class Goal_Oriented_Semantic_Policy(NNBase):
         self.goal_emb = nn.Embedding(num_sem_categories, 8)
         self.train()
 
-        # 添加自注意力层
-        self.attention = nn.MultiheadAttention(hidden_size, 
-                                             num_heads=8, 
-                                             dropout=0.1)
-        
-        # 添加LayerNorm和Dropout
-        self.layer_norm1 = nn.LayerNorm(hidden_size)
-        self.layer_norm2 = nn.LayerNorm(hidden_size)
-        self.dropout = nn.Dropout(0.1)
-
     def forward(self, inputs, rnn_hxs, masks, extras):
-        inputs = inputs.unsqueeze(2)
         x = self.main(inputs)
-        
-        
-        # 确保 x 和线性层的权重在同一个设备上
-        device = x.device
-        linear_layer = nn.Linear(x.size(-1), 256).to(device)
-        x = linear_layer(x)
+        orientation_emb = self.orientation_emb(extras[:, 0])
+        goal_emb = self.goal_emb(extras[:, 1])
 
-        # 添加注意力机制
-        x = x.unsqueeze(0)
-        attn_output, _ = self.attention(x, x, x)
-        x = x + self.dropout(attn_output)
-        x = self.layer_norm1(x)
-        
-        device = self.orientation_emb.weight.device
-        orientation_emb = self.orientation_emb(extras[:, 0].to(device).long())
-        device = self.goal_emb.weight.device
-        goal_emb = self.goal_emb(extras[:, 1].to(device).long())
+        x = torch.cat((x, orientation_emb, goal_emb), 1)
 
-        # 确保 x 的形状与 self.linear1 的输入维度匹配
-        x = torch.cat((x.squeeze(0), orientation_emb, goal_emb), 1)
-
-
-        # 调整 self.linear1 的输入维度
-        if x.size(1) != self.linear1.in_features:
-            self.linear1 = nn.Linear(x.size(1), self.linear1.out_features).to(device)
-
-        x = self.dropout(nn.ReLU()(self.linear1(x)))
-        x = self.layer_norm2(x)
+        x = nn.ReLU()(self.linear1(x))
         if self.is_recurrent:
             x, rnn_hxs = self._forward_gru(x, rnn_hxs, masks)
 
@@ -93,31 +61,16 @@ class Goal_Oriented_Semantic_Policy(NNBase):
 # https://github.com/ikostrikov/pytorch-a2c-ppo-acktr-gail/blob/master/a2c_ppo_acktr/model.py#L15
 class RL_Policy(nn.Module):
 
-    def __init__(self, observation_space, action_space, model_type=0,
+    def __init__(self, obs_shape, action_space, model_type=0,
                  base_kwargs=None):
 
         super(RL_Policy, self).__init__()
         if base_kwargs is None:
             base_kwargs = {}
 
-
-        # 添加一个线性层来调整维度
-        self.input_size = observation_space[0] * observation_space[1] * observation_space[2]
-        self.embedding_size = base_kwargs.get('hidden_size', 256)
-        
-        self.input_projection = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(self.input_size, self.embedding_size)
-        )
-        
-        
-
         if model_type == 1:
-            # 其他网络组件保持不变
             self.network = Goal_Oriented_Semantic_Policy(
-                observation_space,
-                **base_kwargs
-            )
+                obs_shape, **base_kwargs)
         else:
             raise NotImplementedError
 
@@ -142,11 +95,10 @@ class RL_Policy(nn.Module):
         return self.network.rec_state_size
 
     def forward(self, inputs, rnn_hxs, masks, extras):
-        # 在传入attention之前调整维度
-        projected_inputs = self.input_projection(inputs)
-        projected_inputs = projected_inputs.view(-1, 1, self.embedding_size)  # 调整形状以适应attention
-        
-        return self.network(projected_inputs, rnn_hxs, masks, extras)
+        if extras is None:
+            return self.network(inputs, rnn_hxs, masks)
+        else:
+            return self.network(inputs, rnn_hxs, masks, extras)
 
     def act(self, inputs, rnn_hxs, masks, extras=None, deterministic=False):
 
@@ -159,10 +111,6 @@ class RL_Policy(nn.Module):
             action = dist.sample()
 
         action_log_probs = dist.log_probs(action)
-
-        # 确保返回的 action 形状为 [batch_size, action_dim]
-        if action.dim() == 1:
-            action = action.unsqueeze(-1)
 
         return value, action, action_log_probs, rnn_hxs
 
@@ -177,9 +125,6 @@ class RL_Policy(nn.Module):
 
         action_log_probs = dist.log_probs(action)
         dist_entropy = dist.entropy().mean()
-
-        if action.dim() == 1:
-            action = action.unsqueeze(-1)
 
         return value, action_log_probs, dist_entropy, rnn_hxs
 
@@ -230,19 +175,13 @@ class Semantic_Mapping(nn.Module):
             self.screen_h // self.du_scale * self.screen_w // self.du_scale
         ).float().to(self.device)
 
-        self.gaussian_splatting = GaussianSplatting(
-            num_points=self.vision_range * self.vision_range,  # 根据视野范围动态设置点数
-            device=self.device
-        )
-
-
     def forward(self, obs, pose_obs, maps_last, poses_last):
         bs, c, h, w = obs.size()
         depth = obs[:, 3, :, :]
 
         point_cloud_t = du.get_point_cloud_from_z_t(
             depth, self.camera_matrix, self.device, scale=self.du_scale)
-        
+
         agent_view_t = du.transform_camera_view_t(
             point_cloud_t, self.agent_height, 0, self.device)
 
@@ -254,90 +193,24 @@ class Semantic_Mapping(nn.Module):
         xy_resolution = self.resolution
         z_resolution = self.z_resolution
         vision_range = self.vision_range
-
-        # 在GaussianSplatting之前调整XYZ_cm_std的维度
         XYZ_cm_std = agent_view_centered_t.float()
         XYZ_cm_std[..., :2] = (XYZ_cm_std[..., :2] / xy_resolution)
-        XYZ_cm_std[..., :2] = (XYZ_cm_std[..., :2] - vision_range // 2.) / vision_range * 2.
+        XYZ_cm_std[..., :2] = (XYZ_cm_std[..., :2] -
+                               vision_range // 2.) / vision_range * 2.
         XYZ_cm_std[..., 2] = XYZ_cm_std[..., 2] / z_resolution
-        XYZ_cm_std[..., 2] = (XYZ_cm_std[..., 2] - (max_h + min_h) // 2.) / (max_h - min_h) * 2.
-
-        # 调整XYZ_cm_std的形状以匹配特征维度
-        XYZ_cm_std = XYZ_cm_std.reshape(bs, -1, 3)  # [12, 19200, 3]
-        XYZ_cm_std = XYZ_cm_std.permute(0, 2, 1)    # [12, 3, 19200]
-
-        # 初始化GaussianSplatting的位置
-        self.gaussian_splatting.positions.data = XYZ_cm_std.reshape(bs, -1, 3)
-
-        # 使用深度信息和语义特征计算颜色
-        colors = torch.cat([
-            self.feat[:, 1:4, :],  # 使用RGB特征
-            depth.view(bs, 1, -1)  # 添加深度信息
-        ], dim=1)
-        self.gaussian_splatting.colors.data = colors.transpose(1, 2)  # (batch_size, num_points, 4)
-
-        # 在GaussianSplatting之前调整特征
+        XYZ_cm_std[..., 2] = (XYZ_cm_std[..., 2] -
+                              (max_h + min_h) // 2.) / (max_h - min_h) * 2.
         self.feat[:, 1:, :] = nn.AvgPool2d(self.du_scale)(
             obs[:, 4:, :, :]
         ).view(bs, c - 4, h // self.du_scale * w // self.du_scale)
 
-        # 运行GaussianSplatting
-        positions, covariances, alphas, spherical_harmonics = self.gaussian_splatting()
-        
-        # 使用球谐系数增强特征
-        self.feat[:, 1:, :] = nn.AvgPool2d(self.du_scale)(
-            obs[:, 4:, :, :]
-        ).view(bs, c - 4, h // self.du_scale * w // self.du_scale)
+        XYZ_cm_std = XYZ_cm_std.permute(0, 3, 1, 2)
+        XYZ_cm_std = XYZ_cm_std.view(XYZ_cm_std.shape[0],
+                                     XYZ_cm_std.shape[1],
+                                     XYZ_cm_std.shape[2] * XYZ_cm_std.shape[3])
 
-        # 调整球谐系数的维度以匹配特征
-        sh_mean = spherical_harmonics.mean(dim=2)  # [12, 19200] <- [12, 19200, 4]
-        sh_mean = sh_mean.unsqueeze(1)  # [12, 1, 19200]
-        sh_mean = sh_mean.expand(-1, self.feat.size(1), -1)  # [12, 17, 19200]
-
-        # 使用球谐系数增强特征
-        enhanced_features = self.feat * (1 + sh_mean)  # [12, 17, 19200]
-
-        # 调整维度
-        h_scaled = h // self.du_scale
-        w_scaled = w // self.du_scale
-
-        # 调整XYZ_cm_std的形状 [12, 3, 19200] -> [12, 3, h_scaled, w_scaled]
-        XYZ_cm_std = XYZ_cm_std.view(bs, 3, h_scaled, w_scaled)
-
-        # 确保坐标在[-1, 1]范围内
-        XYZ_cm_std = torch.clamp(XYZ_cm_std, min=-1.0, max=1.0)
-
-        # 调整enhanced_features的形状 [12, 17, 19200] -> [12, 17, h_scaled, w_scaled]
-        enhanced_features = enhanced_features.view(bs, -1, h_scaled, w_scaled)
-
-        # 调用splat_feat_nd前，将XYZ_cm_std和enhanced_features展平
-        XYZ_cm_std = XYZ_cm_std.view(bs, 3, -1)
-        enhanced_features = enhanced_features.view(bs, -1, h_scaled * w_scaled)
-    
-        # XYZ_cm_std = agent_view_centered_t.float()
-        # XYZ_cm_std[..., :2] = (XYZ_cm_std[..., :2] / xy_resolution)
-        # XYZ_cm_std[..., :2] = (XYZ_cm_std[..., :2] -
-        #                        vision_range // 2.) / vision_range * 2.
-        # XYZ_cm_std[..., 2] = XYZ_cm_std[..., 2] / z_resolution
-        # XYZ_cm_std[..., 2] = (XYZ_cm_std[..., 2] -
-        #                       (max_h + min_h) // 2.) / (max_h - min_h) * 2.
-        # self.feat[:, 1:, :] = nn.AvgPool2d(self.du_scale)(
-        #     obs[:, 4:, :, :]
-        # ).view(bs, c - 4, h // self.du_scale * w // self.du_scale)
-
-        # XYZ_cm_std = XYZ_cm_std.unsqueeze(1)
-
-        # XYZ_cm_std = XYZ_cm_std.permute(0, 3, 1, 2)
-        # XYZ_cm_std = XYZ_cm_std.view(XYZ_cm_std.shape[0],
-        #                              XYZ_cm_std.shape[1],
-        #                              XYZ_cm_std.shape[2] * XYZ_cm_std.shape[3])
-
-        # 调用splat_feat_nd
         voxels = du.splat_feat_nd(
-            self.init_grid * 0., 
-            enhanced_features,  # 使用增强后的特征
-            XYZ_cm_std
-        ).transpose(2, 3)
+            self.init_grid * 0., self.feat, XYZ_cm_std).transpose(2, 3)
 
         min_z = int(25 / z_resolution - min_h)
         max_z = int((self.agent_height + 1) / z_resolution - min_h)

@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Object-Goal Navigation - 3DGS 可视化系统</title>
+    <link rel="stylesheet" href="static/css/style.css">
+</head>
+<body>
+    <header class="header">
+        <h1>3DGS Object-Goal Navigation</h1>
+        <nav class="tabs" id="tabBar">
+            <button type="button" class="tab active" data-tab="run">训练与评估</button>
+            <button type="button" class="tab" data-tab="viz">3D 可视化</button>
+            <button type="button" class="tab" data-tab="nav">导航监控</button>
+            <button type="button" class="tab" data-tab="sem">语义地图</button>
+            <button type="button" class="tab" data-tab="exp">实验管理</button>
+            <button type="button" class="tab" data-tab="data">数据集</button>
+        </nav>
+    </header>
+
+    <main class="main">
+        <!-- 训练与评估 (默认显示) -->
+        <section id="panel-run" class="panel active">
+            <div class="run-grid">
+                <div class="card run-control">
+                    <h3>一键启动</h3>
+                    <div class="form">
+                        <label>任务</label>
+                        <select id="jobType">
+                            <option value="train">训练</option>
+                            <option value="eval">评估</option>
+                        </select>
+                        <label>实验名</label>
+                        <input type="text" id="expName" value="web_exp">
+                        <label>并行进程</label>
+                        <input type="number" id="nProc" value="2" min="1" max="8">
+                        <label id="lblModel" style="display:none">模型 (评估) <button type="button" id="btnRefreshModels" style="margin-left:8px;padding:2px 8px;font-size:11px">刷新</button></label>
+                        <select id="modelSelect" style="display:none"><option value="">-- 选择 --</option></select>
+                        <label id="lblEp" style="display:none">评估 Episode 数</label>
+                        <input type="number" id="nEp" value="50" min="1" max="500" style="display:none">
+                        <div class="fig-option">
+                            <label><input type="checkbox" id="saveFig"> 保存论文图</label>
+                            <div class="fig-desc" id="figDesc" style="display:none">
+                                评估时自动保存以下图片到 <code>tmp/paper_figures/</code>：<br>
+                                <b>图5-1</b> 轨迹对比图 — Agent与基线方法的导航轨迹<br>
+                                <b>图5-3</b> 失败案例改进前后对比<br>
+                                （图5-2 渲染质量对比需单独运行 eval_reconstruction.py）
+                            </div>
+                        </div>
+                    </div>
+                    <div class="btn-row">
+                        <button type="button" class="btn-go" id="btnStart">开始</button>
+                        <button type="button" class="btn-stop" id="btnStop">停止</button>
+                    </div>
+                    <div id="feedbackMsg" style="margin:8px 0;font-weight:bold;color:#34d399;display:none"></div>
+                    <div class="live-metrics">
+                        <h4>实时指标</h4>
+                        <p>SR: <span id="liveSR">-</span> SPL: <span id="liveSPL">-</span> DTG: <span id="liveDTG">-</span></p>
+                        <p>Steps: <span id="liveSteps">-</span> FPS: <span id="liveFPS">-</span></p>
+                    </div>
+                </div>
+                <div class="card run-log">
+                    <h3>实时输出 <span id="jobStatus" class="status">就绪</span></h3>
+                    <pre id="logBox">点击「开始」按钮启动训练或评估，日志将在此实时显示。</pre>
+                </div>
+            </div>
+        </section>
+
+        <!-- 3D 可视化 -->
+        <section id="panel-viz" class="panel">
+            <div class="viz-grid">
+                <div class="viz-3d">
+                    <div class="panel-head">
+                        <h2>3D 高斯场景</h2>
+                        <div class="btns">
+                            <button type="button" id="btnResetCam">重置视角</button>
+                            <select id="viewMode">
+                                <option value="default">默认</option>
+                                <option value="semantic">语义着色</option>
+                                <option value="topdown">俯视</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div id="canvas3d">
+                        <div class="empty-hint" id="viz3dHint">
+                            <p>3D 场景可视化</p>
+                            <p class="sub">需要运行评估任务后，Agent 的 3DGS 数据将在此实时渲染</p>
+                            <p class="sub">支持鼠标拖拽旋转、滚轮缩放</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="viz-side">
+                    <div class="card">
+                        <h3>场景信息</h3>
+                        <p>Gaussians: <span id="gCount">0</span></p>
+                        <p>节点: <span id="nCount">0</span> 边: <span id="eCount">0</span></p>
+                    </div>
+                    <div class="card">
+                        <h3>Agent 状态</h3>
+                        <p>位置: <span id="agentPos">-</span></p>
+                        <p>朝向: <span id="agentHead">-</span></p>
+                    </div>
+                    <div class="card">
+                        <h3>目标物体</h3>
+                        <select id="goalSelect"><option value="">-- 选择目标 --</option></select>
+                        <p>当前: <span id="curGoal">-</span></p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 导航监控 -->
+        <section id="panel-nav" class="panel">
+            <div class="nav-grid">
+                <div class="card">
+                    <h3>性能指标 (SR / SPL / DTG)</h3>
+                    <canvas id="chartMetrics" width="400" height="200"></canvas>
+                    <p class="empty-hint sub" id="chartHint">运行评估后指标将在此显示为折线图</p>
+                </div>
+                <div class="card">
+                    <h3>导航路径</h3>
+                    <canvas id="pathCanvas" width="350" height="350"></canvas>
+                    <p class="empty-hint sub">运行导航后 Agent 路径将在此绘制</p>
+                </div>
+                <div class="card metrics-card">
+                    <h3>实时指标</h3>
+                    <div class="metrics-row">
+                        <div><span class="lbl">SR</span><span id="mSR" class="val">0</span></div>
+                        <div><span class="lbl">SPL</span><span id="mSPL" class="val">0</span></div>
+                        <div><span class="lbl">DTG</span><span id="mDTG" class="val">0</span></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 语义地图 -->
+        <section id="panel-sem" class="panel">
+            <div class="sem-grid">
+                <div class="card">
+                    <h3>语义标签可视化</h3>
+                    <canvas id="semCanvas" width="500" height="350"></canvas>
+                    <p class="empty-hint sub">运行导航后语义地图将在此显示</p>
+                </div>
+                <div class="card">
+                    <h3>语义热力图</h3>
+                    <canvas id="heatCanvas" width="280" height="280"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <!-- 实验管理 -->
+        <section id="panel-exp" class="panel">
+            <div class="exp-grid">
+                <div class="card">
+                    <h3>实验结果 <span id="expCount" class="badge"></span></h3>
+                    <button type="button" id="btnRefreshExp">刷新列表</button>
+                    <div id="expList" class="list"><p class="loading">加载中...</p></div>
+                </div>
+                <div class="card">
+                    <h3>实验详情</h3>
+                    <div id="expDetail">点击左侧实验查看详情，可导出 JSON</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 数据集 -->
+        <section id="panel-data" class="panel">
+            <div class="data-grid">
+                <div class="card">
+                    <h3>数据集浏览 <span id="sceneCount" class="badge"></span></h3>
+                    <select id="dsSelect">
+                        <option value="gibson">Gibson</option>
+                        <option value="mp3d">MP3D</option>
+                    </select>
+                    <div id="sceneList" class="list"><p class="loading">加载中...</p></div>
+                </div>
+                <div class="card">
+                    <h3>物体类别统计</h3>
+                    <div id="catStatsText"></div>
+                    <canvas id="chartCat" width="300" height="250"></canvas>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- CORE: 全部使用 GET 请求 + 相对路径 -->
+    <script>
+    (function(){
+        var pollTimer = null;
+        var API = (function() {
+            var p = window.location.pathname || '/';
+            if (p.charAt(p.length - 1) !== '/') p += '/';
+            return p;
+        })();
+
+        function setText(id, val) {
+            var el = document.getElementById(id);
+            if (el) el.textContent = (val != null) ? String(val) : '-';
+        }
+
+        function showFeedback(msg, isError) {
+            var el = document.getElementById('feedbackMsg');
+            if (!el) return;
+            el.textContent = msg;
+            el.style.color = isError ? '#f87171' : '#34d399';
+            el.style.display = 'block';
+            setTimeout(function(){ el.style.display = 'none'; }, 8000);
+        }
+
+        function httpGet(url, cb) {
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', url);
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState !== 4) return;
+                if (xhr.status === 0) { cb(null, 'status=0'); return; }
+                var text = xhr.responseText || '';
+                try { cb(JSON.parse(text), null); } catch(e) {
+                    cb(null, 'HTTP ' + xhr.status + ': ' + text.substring(0, 120));
+                }
+            };
+            xhr.send();
+        }
+
+        // ===== 标签页切换 =====
+        function initTabs() {
+            var bar = document.getElementById('tabBar');
+            if (!bar) return;
+            bar.addEventListener('click', function(e) {
+                var btn = e.target;
+                if (!btn.classList || !btn.classList.contains('tab')) return;
+                var t = btn.getAttribute('data-tab');
+                if (!t) return;
+                var allTabs = document.querySelectorAll('.tab');
+                var allPanels = document.querySelectorAll('.panel');
+                for (var j = 0; j < allTabs.length; j++) allTabs[j].classList.remove('active');
+                for (var j = 0; j < allPanels.length; j++) allPanels[j].classList.remove('active');
+                btn.classList.add('active');
+                var panel = document.getElementById('panel-' + t);
+                if (panel) panel.classList.add('active');
+            });
+        }
+
+        // ===== 训练/评估表单 =====
+        function updateJobForm() {
+            var jt = document.getElementById('jobType');
+            if (!jt) return;
+            var isEval = jt.value === 'eval';
+            var ids = ['lblModel','modelSelect','lblEp','nEp'];
+            for (var i = 0; i < ids.length; i++) {
+                var el = document.getElementById(ids[i]);
+                if (el) el.style.display = isEval ? 'block' : 'none';
+            }
+        }
+
+        function toggleFigDesc() {
+            var cb = document.getElementById('saveFig');
+            var desc = document.getElementById('figDesc');
+            if (cb && desc) desc.style.display = cb.checked ? 'block' : 'none';
+        }
+
+        // ===== 任务轮询 =====
+        function startJobPoll() { stopJobPoll(); pollTimer = setInterval(pollJob, 800); pollJob(); }
+        function stopJobPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+        function pollJob() {
+            httpGet(API + 'api/jobs/status', function(d, err) {
+                if (err || !d) return;
+                var logs = d.logs || [];
+                var box = document.getElementById('logBox');
+                if (box && logs.length) { box.textContent = logs.join('\n'); box.scrollTop = box.scrollHeight; }
+                var m = d.metrics || {};
+                setText('liveSR', m.success != null ? m.success.toFixed(3) : '-');
+                setText('liveSPL', m.spl != null ? m.spl.toFixed(3) : '-');
+                setText('liveDTG', m.dtg != null ? m.dtg.toFixed(3) : '-');
+                setText('liveSteps', m.steps != null ? String(m.steps) : '-');
+                setText('liveFPS', m.fps != null ? String(m.fps) : '-');
+                if (d.status !== 'running') {
+                    stopJobPoll();
+                    setText('jobStatus', '就绪');
+                    var st = document.getElementById('jobStatus');
+                    if (st) st.className = 'status';
+                }
+            });
+        }
+
+        function doStartJob() {
+            var typeEl = document.getElementById('jobType');
+            var type = typeEl ? typeEl.value : 'train';
+            var expEl = document.getElementById('expName');
+            var exp = expEl ? expEl.value : 'web_exp';
+            var nProcEl = document.getElementById('nProc');
+            var nProc = nProcEl ? parseInt(nProcEl.value, 10) : 2;
+            var modelEl = document.getElementById('modelSelect');
+            var model = modelEl ? modelEl.value : '';
+            var nEpEl = document.getElementById('nEp');
+            var nEp = nEpEl ? parseInt(nEpEl.value, 10) : 50;
+            var sfEl = document.getElementById('saveFig');
+            var saveFig = (sfEl && sfEl.checked) ? 1 : 0;
+
+            if (type === 'eval' && !model) { alert('请先选择一个模型'); return; }
+
+            var url = API + 'api/jobs/start?type=' + encodeURIComponent(type)
+                + '&exp_name=' + encodeURIComponent(exp)
+                + '&n_proc=' + nProc;
+            if (type === 'eval') {
+                url += '&model_path=' + encodeURIComponent(model)
+                    + '&n_ep=' + nEp + '&save_fig=' + saveFig;
+            }
+
+            showFeedback('正在启动 ' + (type === 'train' ? '训练' : '评估') + ' ...', false);
+            httpGet(url, function(res, err) {
+                if (err) { showFeedback(err, true); return; }
+                if (res.ok) {
+                    showFeedback(res.msg || '已启动', false);
+                    setText('jobStatus', '运行中');
+                    var st = document.getElementById('jobStatus');
+                    if (st) st.className = 'status running';
+                    startJobPoll();
+                } else {
+                    showFeedback(res.msg || '启动失败', true);
+                }
+            });
+        }
+
+        function doStopJob() {
+            showFeedback('正在停止...', false);
+            httpGet(API + 'api/jobs/stop', function(res, err) {
+                if (err) { showFeedback(err, true); return; }
+                showFeedback(res.ok ? '已停止' : (res.msg || '停止失败'), !res.ok);
+                setText('jobStatus', res.ok ? '已停止' : '就绪');
+                if (res.ok) stopJobPoll();
+            });
+        }
+
+        // ===== 数据加载 =====
+        function loadModels() {
+            httpGet(API + 'api/jobs/models', function(d, err) {
+                if (err || !d) return;
+                var sel = document.getElementById('modelSelect');
+                if (!sel) return;
+                sel.innerHTML = '<option value="">-- 选择模型 --</option>';
+                var models = d.models || [];
+                for (var i = 0; i < models.length; i++) {
+                    var o = document.createElement('option');
+                    o.value = models[i].path;
+                    o.textContent = models[i].label;
+                    sel.appendChild(o);
+                }
+            });
+        }
+
+        function loadCategories() {
+            httpGet(API + 'api/categories', function(d, err) {
+                if (err || !d) return;
+                var sel = document.getElementById('goalSelect');
+                if (!sel) return;
+                var cats = d.categories || [];
+                for (var i = 0; i < cats.length; i++) {
+                    var o = document.createElement('option');
+                    o.value = cats[i].name;
+                    o.textContent = cats[i].name;
+                    sel.appendChild(o);
+                }
+            });
+        }
+
+        function setGoal() {
+            var sel = document.getElementById('goalSelect');
+            if (!sel || !sel.value) return;
+            httpGet(API + 'api/goal/set?category=' + encodeURIComponent(sel.value), function() {});
+            setText('curGoal', sel.value);
+        }
+
+        function loadExperiments() {
+            httpGet(API + 'api/experiments', function(exps, err) {
+                var el = document.getElementById('expList');
+                var badge = document.getElementById('expCount');
+                if (!el) return;
+                if (err || !exps) { el.innerHTML = '<p>加载失败</p>'; return; }
+                if (badge) badge.textContent = exps.length ? '(' + exps.length + ')' : '';
+                el.innerHTML = '';
+                if (!exps.length) { el.innerHTML = '<p>暂无实验记录，运行训练或评估后将在此显示</p>'; return; }
+                for (var i = 0; i < exps.length; i++) {
+                    (function(e) {
+                        var d = document.createElement('div');
+                        d.className = 'exp-item';
+                        var m = e.metrics || {};
+                        d.innerHTML = '<b>' + e.name + '</b><br><span class="sub">SR: '
+                            + (m.success != null ? m.success.toFixed(3) : '-')
+                            + ' &nbsp; SPL: ' + (m.spl != null ? m.spl.toFixed(3) : '-') + '</span>';
+                        d.onclick = function() { loadExpDetail(e.name); };
+                        el.appendChild(d);
+                    })(exps[i]);
+                }
+            });
+        }
+
+        function loadExpDetail(name) {
+            httpGet(API + 'api/experiments/' + encodeURIComponent(name), function(d, err) {
+                if (err || !d) return;
+                var el = document.getElementById('expDetail');
+                if (!el) return;
+                var html = '<h4>' + (d.name || name) + '</h4>';
+                if (d.enhanced_metrics) {
+                    var m = d.enhanced_metrics;
+                    html += '<p>Success Rate: <b>' + (m.success || 0).toFixed(3) + '</b></p>';
+                    html += '<p>SPL: <b>' + (m.spl || 0).toFixed(3) + '</b></p>';
+                    html += '<p>DTG: <b>' + (m.dtg || 0).toFixed(3) + '</b></p>';
+                } else {
+                    html += '<p class="sub">该实验暂无指标数据（可能仍在训练中）</p>';
+                }
+                html += '<p style="margin-top:12px"><a href="' + API + 'api/experiments/' + encodeURIComponent(name) + '/export" download class="export-link">导出 JSON</a></p>';
+                el.innerHTML = html;
+            });
+        }
+
+        function loadDataset(ds) {
+            httpGet(API + 'api/datasets', function(data, err) {
+                var el = document.getElementById('sceneList');
+                var badge = document.getElementById('sceneCount');
+                if (!el) return;
+                if (err || !data) { el.innerHTML = '<p>加载失败</p>'; return; }
+                el.innerHTML = '';
+                var info = data[ds] || {};
+                var scenes = (info.train || []).concat(info.val || []).concat(info.scenes || []);
+                if (badge) badge.textContent = scenes.length ? '(' + scenes.length + ' scenes)' : '';
+                if (!scenes.length) { el.innerHTML = '<p>该数据集无可用场景</p>'; return; }
+                for (var i = 0; i < scenes.length; i++) {
+                    var d = document.createElement('div');
+                    d.className = 'scene-item';
+                    d.textContent = scenes[i];
+                    el.appendChild(d);
+                }
+            });
+
+            httpGet(API + 'api/datasets/stats', function(stats, err) {
+                if (err || !stats) return;
+                var el = document.getElementById('catStatsText');
+                if (el) {
+                    var keys = Object.keys(stats);
+                    var html = '<div class="cat-grid">';
+                    for (var i = 0; i < keys.length; i++) {
+                        var k = keys[i], v = stats[k];
+                        html += '<span class="cat-tag">' + k + ' <b>' + (v.count || 0) + '</b></span>';
+                    }
+                    html += '</div>';
+                    el.innerHTML = html;
+                }
+                if (window._updateCatChart) window._updateCatChart(stats);
+            });
+        }
+
+        // ===== 状态轮询 =====
+        function startStatePoll() {
+            setInterval(function() {
+                httpGet(API + 'api/state', function(d, err) {
+                    if (err || !d) return;
+                    setText('agentPos', d.agent_position ? d.agent_position.join(', ') : '-');
+                    setText('agentHead', d.agent_heading != null ? String(d.agent_heading) : '-');
+                    setText('curGoal', d.goal_category || '-');
+                    setText('gCount', String((d.gaussians || []).length));
+                    var sg = d.scene_graph || {};
+                    setText('nCount', String((sg.nodes || []).length));
+                    setText('eCount', String((sg.edges || []).length));
+                    setText('mSR', (d.metrics && d.metrics.sr != null) ? d.metrics.sr.toFixed(3) : '0');
+                    setText('mSPL', (d.metrics && d.metrics.spl != null) ? d.metrics.spl.toFixed(3) : '0');
+                    setText('mDTG', (d.metrics && d.metrics.dtg != null) ? d.metrics.dtg.toFixed(3) : '0');
+                    if (window._updateViz) window._updateViz(d);
+                });
+            }, 2000);
+        }
+
+        // ===== 初始化 =====
+        document.addEventListener('DOMContentLoaded', function() {
+            initTabs();
+            updateJobForm();
+            toggleFigDesc();
+            loadCategories();
+            loadModels();
+            loadExperiments();
+            loadDataset('gibson');
+            startStatePoll();
+
+            var jt = document.getElementById('jobType');
+            if (jt) jt.addEventListener('change', updateJobForm);
+            var sf = document.getElementById('saveFig');
+            if (sf) sf.addEventListener('change', toggleFigDesc);
+            var btnStart = document.getElementById('btnStart');
+            if (btnStart) btnStart.addEventListener('click', doStartJob);
+            var btnStop = document.getElementById('btnStop');
+            if (btnStop) btnStop.addEventListener('click', doStopJob);
+            var btnRefreshModels = document.getElementById('btnRefreshModels');
+            if (btnRefreshModels) btnRefreshModels.addEventListener('click', loadModels);
+            var btnRefreshExp = document.getElementById('btnRefreshExp');
+            if (btnRefreshExp) btnRefreshExp.addEventListener('click', loadExperiments);
+            var goalSelect = document.getElementById('goalSelect');
+            if (goalSelect) goalSelect.addEventListener('change', setGoal);
+            var dsSelect = document.getElementById('dsSelect');
+            if (dsSelect) dsSelect.addEventListener('change', function() { loadDataset(this.value); });
+            var btnResetCam = document.getElementById('btnResetCam');
+            if (btnResetCam) btnResetCam.addEventListener('click', function() { if (window._resetCamera) window._resetCamera(); });
+            var viewMode = document.getElementById('viewMode');
+            if (viewMode) viewMode.addEventListener('change', function() { if (window._setViewMode) window._setViewMode(this.value); });
+        });
+    })();
+    </script>
+
+    <!-- 可选：3D/Chart 可视化增强 -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.116.1/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.116.1/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="static/js/app.js"></script>
+</body>
+</html>

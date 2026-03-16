@@ -57,6 +57,10 @@ def get_args():
                                 (default: 0)""")
     parser.add_argument('--print_images', type=int, default=0,
                         help='1: save visualization as images')
+    parser.add_argument('--save_paper_figures', type=int, default=0,
+                        help='1: save paper figures during evaluation (fig_5_1, fig_5_3)')
+    parser.add_argument('--paper_figures_dir', type=str, default="./tmp/paper_figures",
+                        help='output directory for paper figures')
 
     # Environment, dataset and episode specifications
     parser.add_argument('-efw', '--env_frame_width', type=int, default=640,
@@ -101,15 +105,18 @@ def get_args():
                         help='learning rate (default: 2.5e-5)')
     parser.add_argument('--global_hidden_size', type=int, default=256,
                         help='global_hidden_size')
-
+    parser.add_argument('--eps', type=float, default=1e-5,
+                        help='RL Optimizer epsilon (default: 1e-5)')
     parser.add_argument('--alpha', type=float, default=0.99,
                         help='RL Optimizer alpha (default: 0.99)')
-
+    parser.add_argument('--gamma', type=float, default=0.99,
+                        help='discount factor for rewards (default: 0.99)')
     parser.add_argument('--use_gae', action='store_true', default=False,
                         help='use generalized advantage estimation')
     parser.add_argument('--tau', type=float, default=0.95,
                         help='gae parameter (default: 0.95)')
-
+    parser.add_argument('--entropy_coef', type=float, default=0.001,
+                        help='entropy term coefficient (default: 0.01)')
     parser.add_argument('--value_loss_coef', type=float, default=0.5,
                         help='value loss coefficient (default: 0.5)')
     parser.add_argument('--max_grad_norm', type=float, default=0.5,
@@ -118,7 +125,8 @@ def get_args():
                         help='number of forward steps in A2C (default: 5)')
     parser.add_argument('--ppo_epoch', type=int, default=4,
                         help='number of ppo epochs (default: 4)')
-    
+    parser.add_argument('--num_mini_batch', type=str, default="auto",
+                        help='number of batches for ppo (default: 32)')
     parser.add_argument('--clip_param', type=float, default=0.2,
                         help='ppo clip parameter (default: 0.2)')
     parser.add_argument('--use_recurrent_global', type=int, default=0,
@@ -144,55 +152,6 @@ def get_args():
     parser.add_argument('--map_pred_threshold', type=float, default=1.0)
     parser.add_argument('--exp_pred_threshold', type=float, default=1.0)
     parser.add_argument('--collision_threshold', type=float, default=0.20)
-
-    parser.add_argument('--success_reward', type=float, default=2.0,
-                    help='reward for successfully reaching the goal')
-    parser.add_argument('--distance_reward_scale', type=float, default=0.01,
-                        help='scale for distance-based reward')
-    parser.add_argument('--exploration_reward_scale', type=float, default=0.1,
-                        help='scale for exploration reward')
-    
-    parser.add_argument('--entropy_decay', type=float, default=0.995,
-                        help='entropy coefficient decay rate')
-    parser.add_argument('--l2_reg', type=float, default=0.01,
-                        help='L2 regularization coefficient')
-    parser.add_argument('--kl_target', type=float, default=0.02,
-                        help='target KL divergence threshold')
-    parser.add_argument("--max_action", type=float, default=1.0, 
-                        help="Maximum action value")
-    
-
-    
-    
-    
-    # 网络结构相关参数
-    parser.add_argument("--state_dim", type=int, default=512, help="State dimension")
-    parser.add_argument("--action_dim", type=int, default=2, help="Action dimension")
-    parser.add_argument("--max_train_steps", type=int, default=int(3e6), help=" Maximum number of training steps")
-    parser.add_argument("--evaluate_freq", type=float, default=5e3, help="Evaluate the policy every 'evaluate_freq' steps")
-    parser.add_argument("--save_freq", type=int, default=20, help="Save frequency")
-    parser.add_argument("--policy_dist", type=str, default="Gaussian", help="Beta or Gaussian")
-    parser.add_argument("--batch_size", type=int, default=2048, help="Batch size")
-    parser.add_argument("--mini_batch_size", type=int, default=64, help="Minibatch size")
-    parser.add_argument("--hidden_width", type=int, default=64, help="The number of neurons in hidden layers of the neural network")
-    parser.add_argument("--lr_a", type=float, default=3e-4, help="Learning rate of actor")
-    parser.add_argument("--lr_c", type=float, default=3e-4, help="Learning rate of critic")
-    parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor")
-    parser.add_argument("--lamda", type=float, default=0.95, help="GAE parameter")
-    parser.add_argument("--epsilon", type=float, default=0.2, help="PPO clip parameter")
-    parser.add_argument("--K_epochs", type=int, default=10, help="PPO parameter")
-    parser.add_argument("--use_adv_norm", type=bool, default=True, help="Trick 1:advantage normalization")
-    parser.add_argument("--use_state_norm", type=bool, default=True, help="Trick 2:state normalization")
-    parser.add_argument("--use_reward_norm", type=bool, default=False, help="Trick 3:reward normalization")
-    parser.add_argument("--use_reward_scaling", type=bool, default=True, help="Trick 4:reward scaling")
-    parser.add_argument("--entropy_coef", type=float, default=0.01, help="Trick 5: policy entropy")
-    parser.add_argument("--use_lr_decay", type=bool, default=True, help="Trick 6:learning rate Decay")
-    parser.add_argument("--use_grad_clip", type=bool, default=True, help="Trick 7: Gradient clip")
-    parser.add_argument("--use_orthogonal_init", type=bool, default=True, help="Trick 8: orthogonal initialization")
-    parser.add_argument("--set_adam_eps", type=float, default=True, help="Trick 9: set Adam epsilon=1e-5")
-    parser.add_argument("--use_tanh", type=float, default=True, help="Trick 10: tanh activation function")
-    
-
 
     # parse arguments
     args = parser.parse_args()
@@ -226,10 +185,17 @@ def get_args():
                                  torch.cuda.get_device_properties(
                                      i).total_memory
                                  / 1024 / 1024 / 1024)
-                assert gpu_memory > min_memory_required, \
-                    """Insufficient GPU memory for GPU {}, gpu memory ({}GB)
-                    needs to be greater than {}GB""".format(
-                        i, gpu_memory, min_memory_required)
+
+            if gpu_memory <= min_memory_required:
+                max_scenes_for_gpu = int((gpu_memory - 0.8) / 0.4)
+                max_scenes_for_gpu = max(max_scenes_for_gpu, 1)
+                print("Auto-reducing total_num_scenes from {} to {} "
+                      "to fit GPU memory ({:.1f}GB)".format(
+                          args.total_num_scenes, max_scenes_for_gpu,
+                          gpu_memory))
+                args.total_num_scenes = max_scenes_for_gpu
+                min_memory_required = max(
+                    0.8 + 0.4 * args.total_num_scenes, 2.6)
 
             num_processes_per_gpu = int(gpu_memory / 2.6)
             num_processes_on_first_gpu = \
@@ -267,9 +233,9 @@ def get_args():
     else:
         args.sem_gpu_id = -2
 
-    if args.mini_batch_size == "auto":
-        args.mini_batch_size = max(args.num_processes // 2, 1)
+    if args.num_mini_batch == "auto":
+        args.num_mini_batch = max(args.num_processes // 2, 1)
     else:
-        args.mini_batch_size = int(args.mini_batch_size)
+        args.num_mini_batch = int(args.num_mini_batch)
 
     return args

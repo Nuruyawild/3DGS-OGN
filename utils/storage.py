@@ -6,7 +6,6 @@ from collections import namedtuple
 import numpy as np
 import torch
 from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
-import gym
 
 
 def _flatten_helper(T, N, _tensor):
@@ -15,14 +14,26 @@ def _flatten_helper(T, N, _tensor):
 
 class RolloutStorage(object):
 
-    def __init__(self, num_steps, num_processes, obs_shape, action_space):
+    def __init__(self, num_steps, num_processes, obs_shape, action_space,
+                 rec_state_size):
+
+        if action_space.__class__.__name__ == 'Discrete':
+            self.n_actions = 1
+            action_type = torch.long
+        else:
+            self.n_actions = action_space.shape[0]
+            action_type = torch.float32
 
         self.obs = torch.zeros(num_steps + 1, num_processes, *obs_shape)
-        self.actions = torch.zeros(num_steps, num_processes, action_space.n)
-        self.rewards = torch.zeros(num_steps, num_processes, 1)
-        self.value_preds = torch.zeros(num_steps + 1, num_processes, 1)
-        self.returns = torch.zeros(num_steps + 1, num_processes, 1)
-        self.masks = torch.ones(num_steps + 1, num_processes, 1)
+        self.rec_states = torch.zeros(num_steps + 1, num_processes,
+                                      rec_state_size)
+        self.rewards = torch.zeros(num_steps, num_processes)
+        self.value_preds = torch.zeros(num_steps + 1, num_processes)
+        self.returns = torch.zeros(num_steps + 1, num_processes)
+        self.action_log_probs = torch.zeros(num_steps, num_processes)
+        self.actions = torch.zeros((num_steps, num_processes, self.n_actions),
+                                   dtype=action_type)
+        self.masks = torch.ones(num_steps + 1, num_processes)
 
         self.num_steps = num_steps
         self.step = 0
@@ -31,10 +42,12 @@ class RolloutStorage(object):
 
     def to(self, device):
         self.obs = self.obs.to(device)
-        self.actions = self.actions.to(device)
+        self.rec_states = self.rec_states.to(device)
         self.rewards = self.rewards.to(device)
         self.value_preds = self.value_preds.to(device)
         self.returns = self.returns.to(device)
+        self.action_log_probs = self.action_log_probs.to(device)
+        self.actions = self.actions.to(device)
         self.masks = self.masks.to(device)
         if self.has_extras:
             self.extras = self.extras.to(device)
@@ -43,7 +56,9 @@ class RolloutStorage(object):
     def insert(self, obs, rec_states, actions, action_log_probs, value_preds,
                rewards, masks):
         self.obs[self.step + 1].copy_(obs)
-        self.actions[self.step].copy_(actions)
+        self.rec_states[self.step + 1].copy_(rec_states)
+        self.actions[self.step].copy_(actions.view(-1, self.n_actions))
+        self.action_log_probs[self.step].copy_(action_log_probs)
         self.value_preds[self.step].copy_(value_preds)
         self.rewards[self.step].copy_(rewards)
         self.masks[self.step + 1].copy_(masks)
@@ -52,6 +67,7 @@ class RolloutStorage(object):
 
     def after_update(self):
         self.obs[0].copy_(self.obs[-1])
+        self.rec_states[0].copy_(self.rec_states[-1])
         self.masks[0].copy_(self.masks[-1])
         if self.has_extras:
             self.extras[0].copy_(self.extras[-1])
@@ -72,19 +88,18 @@ class RolloutStorage(object):
                 self.returns[step] = self.returns[step + 1] * gamma \
                     * self.masks[step + 1] + self.rewards[step]
 
-    def feed_forward_generator(self, advantages, mini_batch_size):
-
+    def feed_forward_generator(self, advantages, num_mini_batch):
 
         num_steps, num_processes = self.rewards.size()[0:2]
         batch_size = num_processes * num_steps
-        mini_batch_size = batch_size // mini_batch_size
-        assert batch_size >= mini_batch_size, (
+        mini_batch_size = batch_size // num_mini_batch
+        assert batch_size >= num_mini_batch, (
             "PPO requires the number of processes ({}) "
             "* number of steps ({}) = {} "
             "to be greater than or equal to "
             "the number of PPO mini batches ({})."
             "".format(num_processes, num_steps, num_processes * num_steps,
-                      mini_batch_size))
+                      num_mini_batch))
 
         sampler = BatchSampler(SubsetRandomSampler(range(batch_size)),
                                mini_batch_size, drop_last=False)
@@ -92,7 +107,9 @@ class RolloutStorage(object):
         for indices in sampler:
             yield {
                 'obs': self.obs[:-1].view(-1, *self.obs.size()[2:])[indices],
-                'actions': self.actions.view(-1)[indices],
+                'rec_states': self.rec_states[:-1].view(
+                    -1, self.rec_states.size(-1))[indices],
+                'actions': self.actions.view(-1, self.n_actions)[indices],
                 'value_preds': self.value_preds[:-1].view(-1)[indices],
                 'returns': self.returns[:-1].view(-1)[indices],
                 'masks': self.masks[:-1].view(-1)[indices],
@@ -103,15 +120,14 @@ class RolloutStorage(object):
                 if self.has_extras else None,
             }
 
-    def recurrent_generator(self, advantages, mini_batch_size):
-
+    def recurrent_generator(self, advantages, num_mini_batch):
 
         num_processes = self.rewards.size(1)
-        assert num_processes >= mini_batch_size, (
+        assert num_processes >= num_mini_batch, (
             "PPO requires the number of processes ({}) "
             "to be greater than or equal to the number of "
-            "PPO mini batches ({}).".format(num_processes, mini_batch_size))
-        num_envs_per_batch = num_processes // mini_batch_size
+            "PPO mini batches ({}).".format(num_processes, num_mini_batch))
+        num_envs_per_batch = num_processes // num_mini_batch
         perm = torch.randperm(num_processes)
         T, N = self.num_steps, num_envs_per_batch
 
@@ -170,48 +186,17 @@ class RolloutStorage(object):
 
 class GlobalRolloutStorage(RolloutStorage):
 
-    def __init__(self, num_steps, num_processes, obs_shape, action_space, rec_state_size=0):
-        self.obs = torch.zeros(num_steps + 1, num_processes, *obs_shape)
-        
-        # 初始化 rec_states
-        if rec_state_size > 0:
-            self.rec_states = torch.zeros(num_steps + 1, num_processes, rec_state_size)
-        else:
-        # 提供一个默认的零张量
-            self.rec_states = torch.zeros(num_steps + 1, num_processes, 1)
-
-        # 根据动作空间类型初始化动作存储
-        if isinstance(action_space, gym.spaces.Discrete):
-            action_shape = 1
-        elif isinstance(action_space, gym.spaces.Box):
-            action_shape = action_space.shape[0]
-        else:
-            raise NotImplementedError("不支持的动作空间类型")
-        
-        self.actions = torch.zeros(num_steps, num_processes, action_shape)
-        self.rewards = torch.zeros(num_steps, num_processes, 1)
-        self.value_preds = torch.zeros(num_steps + 1, num_processes, 1)
-        self.returns = torch.zeros(num_steps + 1, num_processes, 1)
-        self.action_log_probs = torch.zeros(num_steps, num_processes, action_shape)
-        self.masks = torch.ones(num_steps + 1, num_processes, 1)
-        self.extras = torch.zeros(num_steps + 1, num_processes, 2)  # Adjust the size as needed
-        
-
-
-
-        self.num_steps = num_steps
-        self.step = 0
-        self.has_extras = False
-        self.extras_size = None
+    def __init__(self, num_steps, num_processes, obs_shape, action_space,
+                 rec_state_size, extras_size):
+        super(GlobalRolloutStorage, self).__init__(
+            num_steps, num_processes, obs_shape, action_space, rec_state_size)
+        self.extras = torch.zeros((num_steps + 1, num_processes, extras_size),
+                                  dtype=torch.long)
+        self.has_extras = True
+        self.extras_size = extras_size
 
     def insert(self, obs, rec_states, actions, action_log_probs, value_preds,
                rewards, masks, extras):
-        # 如果 rec_states 为 None，使用全零张量
-        if rec_states is None:
-            rec_states = torch.zeros_like(self.rec_states[self.step + 1])
-
-        self.rec_states[self.step + 1].copy_(rec_states)
-        
         self.extras[self.step + 1].copy_(extras)
         super(GlobalRolloutStorage, self).insert(
             obs, rec_states, actions,

@@ -7,21 +7,18 @@ import gym
 import torch.nn as nn
 import torch
 import numpy as np
-from torch.utils.tensorboard import SummaryWriter
-
 
 from model import RL_Policy, Semantic_Mapping
 from utils.storage import GlobalRolloutStorage
 from envs import make_vec_envs
 from arguments import get_args
 import algo
-from algo.ppo_discrete import PPO_discrete
 
-os.environ["OMP_NUM_THREADS"] = "1"
+if os.environ.get("OMP_NUM_THREADS") is None:
+    os.environ["OMP_NUM_THREADS"] = "1"
 
 
 def main():
-    
     args = get_args()
 
     np.random.seed(args.seed)
@@ -38,8 +35,6 @@ def main():
         os.makedirs(log_dir)
     if not os.path.exists(dump_dir):
         os.makedirs(dump_dir)
-
-    writer = SummaryWriter(log_dir=os.path.join(log_dir, 'tensorboard'))
 
     logging.basicConfig(
         filename=log_dir + 'train.log',
@@ -61,13 +56,10 @@ def main():
         episode_success = []
         episode_spl = []
         episode_dist = []
-        
         for _ in range(args.num_processes):
             episode_success.append(deque(maxlen=num_episodes))
             episode_spl.append(deque(maxlen=num_episodes))
             episode_dist.append(deque(maxlen=num_episodes))
-
-
 
     else:
         episode_success = deque(maxlen=1000)
@@ -91,16 +83,6 @@ def main():
     torch.set_num_threads(1)
     envs = make_vec_envs(args)
     obs, infos = envs.reset()
-
-    # 从环境中获取 observation_space 和 action_space
-    args.observation_space = envs.observation_space
-    args.action_space = envs.action_space
-
-    # 确保所有环境都有初始距离值
-    for env_idx in range(num_scenes):
-        if infos[env_idx].get('distance_to_goal') is None:
-            print(f"Warning: Setting default distance for env {env_idx}")
-            infos[env_idx]['distance_to_goal'] = 5.0  # 设置一个默认的初始距离
 
     torch.set_grad_enabled(False)
 
@@ -168,19 +150,6 @@ def main():
 
         locs = full_pose.cpu().numpy()
         planner_pose_inputs[:, :3] = locs
-
-        # 在计算距离惩罚之前添加调试信息
-        for env_idx in range(num_scenes):
-            
-            # 安全地计算距离惩罚
-            distance = infos[env_idx].get('distance_to_goal')
-            if distance is not None:
-                distance_penalty = -0.01 * distance
-            else:
-                print(f"Warning: distance_to_goal is None for env_idx {env_idx}")
-                distance_penalty = 0.0  # 设置默认值
-                
-
         for e in range(num_scenes):
             r, c = locs[e, 1], locs[e, 0]
             loc_r, loc_c = [int(r * 100.0 / args.map_resolution),
@@ -229,46 +198,12 @@ def main():
             torch.from_numpy(origins[e]).to(device).float()
 
     def update_intrinsic_rew(e):
-        # 确保距离值存在且有效
-        if 'distance_to_goal' not in infos[e]:
-            infos[e]['distance_to_goal'] = 5.0  # 设置默认最大距离
-        if 'prev_distance' not in infos[e]:
-            infos[e]['prev_distance'] = infos[e]['distance_to_goal']
-        
-        current_distance = float(infos[e]['distance_to_goal'])
-        prev_distance = float(infos[e]['prev_distance'])
-        
-        # 优化进度奖励 - 使用非线性奖励
-        progress = prev_distance - current_distance
-        progress_reward = np.sign(progress) * (np.abs(progress) ** 0.5) * args.distance_reward_scale
-        
-        # 增加探索奖励的权重
         prev_explored_area = full_map[e, 1].sum(1).sum(0)
-        full_map[e, :, lmb[e, 0]:lmb[e, 1], lmb[e, 2]:lmb[e, 3]] = local_map[e]
+        full_map[e, :, lmb[e, 0]:lmb[e, 1], lmb[e, 2]:lmb[e, 3]] = \
+            local_map[e]
         curr_explored_area = full_map[e, 1].sum(1).sum(0)
-        area_reward = (curr_explored_area - prev_explored_area) * args.exploration_reward_scale * 2.0
-        
-        # 增加成功奖励并添加阶段性奖励
-        success_reward = args.success_reward if infos[e].get('success', False) else 0.0
-        if current_distance < prev_distance * 0.5:  # 添加阶段性奖励
-            success_reward += args.success_reward * 0.3
-            
-        # 更新距离
-        infos[e]['prev_distance'] = current_distance
-        
-        # 组合奖励
-        intrinsic_rews[e] = (
-            progress_reward + 
-            area_reward + 
-            success_reward
-        ) * (args.map_resolution / 100.)**2
-        
-        print(f"\nDebug Rewards (env {e}):")
-        print(f"  Progress Reward: {progress_reward:.4f}")
-        print(f"  Area Reward: {area_reward:.4f}")
-        print(f"  Success Reward: {success_reward:.4f}")
-        print(f"  Total Intrinsic: {intrinsic_rews[e]:.4f}")
-        print(f"  Distance Change: {prev_distance:.4f} -> {current_distance:.4f}")
+        intrinsic_rews[e] = curr_explored_area - prev_explored_area
+        intrinsic_rews[e] *= (args.map_resolution / 100.)**2  # to m^2
 
     init_map_and_pose()
 
@@ -298,58 +233,21 @@ def main():
                                       'hidden_size': g_hidden_size,
                                       'num_sem_categories': ngc - 8
                                       }).to(device)
-    
-    # g_agent = algo.PPO(g_policy, args.clip_param, args.ppo_epoch,
-    #                    args.mini_batch_size, args.value_loss_coef,
-    #                    args.entropy_coef, lr=args.lr, eps=args.eps,
-    #                    max_grad_norm=args.max_grad_norm)
-    
-    # 全局策略观测空间和动作空间的维度
-    state_dim = np.prod(g_observation_space.shape)  # 将观测空间展平
-    action_dim = g_action_space.shape[0]  # 动作空间维度
-
-    # 初始化 PPO_discrete 策略
-    g_actor_critic = PPO_discrete(
-        args,  # 直接传入 args 对象
-        state_dim=np.prod(g_observation_space.shape),  # 观测空间展平后的维度
-        action_dim=g_action_space.shape[0]  # 连续动作空间的维度
-    )
-    # 如果需要，可以设置最大动作值
-    args.max_action = float(g_action_space.high[0])
-
-    # 将模型移动到 GPU
-    if args.cuda:
-        g_actor_critic.cuda()
-
-    # 初始化 PPO 优化器
-    g_agent = g_actor_critic
+    g_agent = algo.PPO(g_policy, args.clip_param, args.ppo_epoch,
+                       args.num_mini_batch, args.value_loss_coef,
+                       args.entropy_coef, lr=args.lr, eps=args.eps,
+                       max_grad_norm=args.max_grad_norm)
 
     global_input = torch.zeros(num_scenes, ngc, local_w, local_h)
     global_orientation = torch.zeros(num_scenes, 1).long()
     intrinsic_rews = torch.zeros(num_scenes).to(device)
     extras = torch.zeros(num_scenes, 2)
 
-    # 调试信息：打印传递给 GlobalRolloutStorage 的参数
-    print("Debug: GlobalRolloutStorage parameters:")
-    print(f"  num_global_steps: {args.num_global_steps}")
-    print(f"  num_scenes: {num_scenes}")
-    print(f"  g_observation_space.shape: {g_observation_space.shape}")
-    print(f"  g_action_space: {g_action_space}")
-    print(f"  g_policy.rec_state_size: {g_policy.rec_state_size}")
-    print(f"  es: {es}")
-
-    # 获取 rec_state_size
-    rec_state_size = g_policy.rec_state_size if hasattr(g_policy, 'rec_state_size') else 0
-
-
     # Storage
-    g_rollouts = GlobalRolloutStorage(
-        args.num_global_steps,
-        num_scenes,
-        g_observation_space.shape,
-        g_action_space,
-        
-    ).to(device)
+    g_rollouts = GlobalRolloutStorage(args.num_global_steps,
+                                      num_scenes, g_observation_space.shape,
+                                      g_action_space, g_policy.rec_state_size,
+                                      es).to(device)
 
     if args.load != "0":
         print("Loading model {}".format(args.load))
@@ -453,34 +351,26 @@ def main():
                                      for x in done]).to(device)
         g_masks *= l_masks
 
-        for env_idx, x in enumerate(done):
+        for e, x in enumerate(done):
             if x:
-                spl = infos[env_idx]['spl']
-                success = infos[env_idx]['success']
-                dist = infos[env_idx]['distance_to_goal']
-                
-                if not args.eval:
-                    episode_success.append(float(success))
-                    episode_spl.append(float(spl))
-                    episode_dist.append(float(dist))
-                    
-                    window_size = 50
-                    if len(episode_dist) >= window_size:
-                        recent_spl = list(episode_spl)[-window_size:]
-                        recent_success = list(episode_success)[-window_size:]
-                        recent_dist = list(episode_dist)[-window_size:]
-                        
-                        print(f"\nRecent {window_size} Episodes Stats:")
-                        print(f"  Avg SPL: {np.mean(recent_spl):.4f}")
-                        print(f"  Avg Success: {np.mean(recent_success):.4f}")
-                        print(f"  Avg Distance: {np.mean(recent_dist):.4f}")
-                        print(f"  Min Distance: {np.min(recent_dist):.4f}")
-                        print(f"  Max Distance: {np.max(recent_dist):.4f}")
-                        print(f"  Distance Std: {np.std(recent_dist):.4f}")
-
-                wait_env[env_idx] = 1.
-                update_intrinsic_rew(env_idx)
-                init_map_and_pose_for_env(env_idx)
+                spl = infos[e]['spl']
+                success = infos[e]['success']
+                dist = infos[e]['distance_to_goal']
+                spl_per_category[infos[e]['goal_name']].append(spl)
+                success_per_category[infos[e]['goal_name']].append(success)
+                if args.eval:
+                    episode_success[e].append(success)
+                    episode_spl[e].append(spl)
+                    episode_dist[e].append(dist)
+                    if len(episode_success[e]) == num_episodes:
+                        finished[e] = 1
+                else:
+                    episode_success.append(success)
+                    episode_spl.append(spl)
+                    episode_dist.append(dist)
+                wait_env[e] = 1.
+                update_intrinsic_rew(e)
+                init_map_and_pose_for_env(e)
         # ------------------------------------------------------------------
 
         # ------------------------------------------------------------------
@@ -552,45 +442,11 @@ def main():
             extras[:, 0] = global_orientation[:, 0]
             extras[:, 1] = goal_cat_id
 
-            # If you want to get exploration reward and metrics to debug, uncomment the following code
-            # for env_idx in range(num_scenes):
-            #     print(f"Env {env_idx} info:")
-            #     print(f"  Full info: {infos[env_idx]}")
-
-            # 安全的距离惩罚计算
-            distance_penalties = []
-            for env_idx in range(num_scenes):
-                # 如果distance_to_goal为None，使用上一次的有效距离或默认值
-                if infos[env_idx].get('distance_to_goal') is None:
-                    # 尝试从环境中获取实际距离
-                    try:
-                        agent_position = envs.envs[env_idx].habitat_env.sim.get_agent_state().position
-                        goal_position = envs.envs[env_idx].habitat_env.current_episode.goals[0].position
-                        distance = float(np.linalg.norm(agent_position - goal_position))
-                        infos[env_idx]['distance_to_goal'] = distance
-                    except:
-                        # 如果无法获取实际距离，使用默认值
-                        infos[env_idx]['distance_to_goal'] = 5.0
-                        
-                penalty = -0.01 * infos[env_idx]['distance_to_goal']
-                distance_penalties.append(penalty)
-
-            distance_penalty = torch.tensor(distance_penalties, dtype=torch.float32).to(device)
-
-
-
-            # 修改全局奖励计算
+            # Get exploration reward and metrics
             g_reward = torch.from_numpy(np.asarray(
-                [infos[env_idx].get('g_reward', 0.0) * 2.0 if infos[env_idx].get('success', False)
-                 else infos[env_idx].get('g_reward', 0.0) * 0.5
-                for env_idx in range(num_scenes)]
-            )).float().to(device)
-
-            # 增加探索奖励
-            exploration_reward = args.intrinsic_rew_coeff * intrinsic_rews.detach()
-
-            # 组合多个奖励项
-            g_reward = g_reward + exploration_reward + distance_penalty
+                [infos[env_idx]['g_reward'] for env_idx in range(num_scenes)])
+            ).float().to(device)
+            g_reward += args.intrinsic_rew_coeff * intrinsic_rews.detach()
 
             g_process_rewards += g_reward.cpu().numpy()
             g_total_rewards = g_process_rewards * \
@@ -610,8 +466,8 @@ def main():
             else:
                 g_rollouts.insert(
                     global_input, g_rec_states,
-                    g_action, g_action_log_prob, g_value.unsqueeze(-1),
-                    g_reward.unsqueeze(-1), g_masks.unsqueeze(-1).expand(-1, 1), extras
+                    g_action, g_action_log_prob, g_value,
+                    g_reward, g_masks, extras
                 )
 
             # Sample long-term goal from global policy
@@ -686,20 +542,10 @@ def main():
                     extras=g_rollouts.extras[-1]
                 ).detach()
 
-                g_rollouts.compute_returns(g_next_value.unsqueeze(-1), args.use_gae, args.gamma, args.tau)
-                # 收集训练指标
-                metrics = {
-                    'spl': np.mean(episode_spl) if len(episode_spl) > 0 else 0,
-                    'success': np.mean(episode_success) if len(episode_success) > 0 else 0,
-                }
-
-                # 准备 ReplayBuffer
-                g_agent.prepare_buffer_from_rollouts(g_rollouts)
-
-                # 计算当前的 value loss 和 action loss
-                g_value_loss, g_action_loss, g_dist_entropy = g_agent.update(total_steps=total_steps)
-
-                # 更新 losses 队列
+                g_rollouts.compute_returns(g_next_value, args.use_gae,
+                                           args.gamma, args.tau)
+                g_value_loss, g_action_loss, g_dist_entropy = \
+                    g_agent.update(g_rollouts)
                 g_value_losses.append(g_value_loss)
                 g_action_losses.append(g_action_loss)
                 g_dist_entropies.append(g_dist_entropy)
@@ -749,57 +595,30 @@ def main():
                         total_spl.append(spl)
 
                 if len(total_spl) > 0:
-                    avg_success = np.mean(total_success)
-                    avg_spl = np.mean(total_spl)
-                    avg_dist = np.mean(total_dist)
-
                     log += " ObjectNav succ/spl/dtg:"
                     log += " {:.3f}/{:.3f}/{:.3f}({:.0f}),".format(
-                        avg_success,
-                        avg_spl,
-                        avg_dist,
-                        len(total_spl)
-                    )
-                    # 记录到 TensorBoard
-                    writer.add_scalar('Evaluation/Avg_Success', avg_success, step)
-                    writer.add_scalar('Evaluation/Avg_SPL', avg_spl, step)
-                    writer.add_scalar('Evaluation/Avg_DistanceToGoal', avg_dist, step)
-
+                        np.mean(total_success),
+                        np.mean(total_spl),
+                        np.mean(total_dist),
+                        len(total_spl))
             else:
                 if len(episode_success) > 100:
-                    avg_episode_success = np.mean(episode_success)
-                    avg_episode_spl = np.mean(episode_spl)
-                    avg_episode_dist = np.mean(episode_dist)
-
                     log += " ObjectNav succ/spl/dtg:"
                     log += " {:.3f}/{:.3f}/{:.3f}({:.0f}),".format(
-                        avg_episode_success,
-                        avg_episode_spl,
-                        avg_episode_dist,
+                        np.mean(episode_success),
+                        np.mean(episode_spl),
+                        np.mean(episode_dist),
                         len(episode_spl))
-
-                    # 记录到 TensorBoard
-                    writer.add_scalar('Training/Episode_Success', avg_episode_success, step)
-                    writer.add_scalar('Training/Episode_SPL', avg_episode_spl, step)
-                    writer.add_scalar('Training/Episode_DistanceToGoal', avg_episode_dist, step)
 
             log += "\n\tLosses:"
             if len(g_value_losses) > 0 and not args.eval:
-                avg_value_losses = np.mean(g_value_losses)
-                avg_action_losses = np.mean(g_action_losses)
-                avg_dist_entropies = np.mean(g_dist_entropies)
-
                 log += " ".join([
                     " Policy Loss value/action/dist:",
                     "{:.3f}/{:.3f}/{:.3f},".format(
-                        avg_value_losses,
-                        avg_action_losses,
-                        avg_dist_entropies)
+                        np.mean(g_value_losses),
+                        np.mean(g_action_losses),
+                        np.mean(g_dist_entropies))
                 ])
-                # 记录到 TensorBoard
-                writer.add_scalar('Training_Loss/value', avg_value_losses, step)
-                writer.add_scalar('Training_Loss/action', avg_action_losses, step)
-                writer.add_scalar('Training_Loss/dist', avg_dist_entropies, step)
 
             print(log)
             logging.info(log)
@@ -871,8 +690,6 @@ def main():
         with open('{}/{}_success_per_cat_pred_thr.json'.format(
                 dump_dir, args.split), 'w') as f:
             json.dump(success_per_category, f)
-        
-    writer.close()
 
 
 if __name__ == "__main__":

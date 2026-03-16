@@ -168,7 +168,9 @@
         <section id="panel-data" class="panel">
             <div class="data-grid">
                 <div class="card">
-                    <h3>数据集浏览 <span id="sceneCount" class="badge"></span></h3>
+                    <h3>数据集浏览 <span id="sceneCount" class="badge"></span>
+                        <button type="button" id="btnRefreshDataset" style="margin-left:8px;padding:2px 8px;font-size:11px">刷新</button>
+                    </h3>
                     <select id="dsSelect">
                         <option value="gibson">Gibson</option>
                         <option value="mp3d">MP3D</option>
@@ -190,9 +192,11 @@
         var pollTimer = null;
         var API = (function() {
             var p = window.location.pathname || '/';
-            if (p.charAt(p.length - 1) !== '/') p += '/';
-            return p;
+            var base = p.replace(/\/[^\/]*$/, '') || '/';
+            if (base.charAt(base.length - 1) !== '/') base += '/';
+            return base;
         })();
+        var API_BASE = (API === '//' || !API) ? '/api/' : (API + 'api/');
 
         function setText(id, val) {
             var el = document.getElementById(id);
@@ -209,8 +213,9 @@
         }
 
         function httpGet(url, cb) {
+            var fullUrl = (url.indexOf('http') === 0) ? url : (window.location.origin + (url.charAt(0) === '/' ? url : '/' + url));
             var xhr = new XMLHttpRequest();
-            xhr.open('GET', url);
+            xhr.open('GET', fullUrl);
             xhr.onreadystatechange = function() {
                 if (xhr.readyState !== 4) return;
                 if (xhr.status === 0) { cb(null, 'status=0'); return; }
@@ -238,6 +243,7 @@
                 btn.classList.add('active');
                 var panel = document.getElementById('panel-' + t);
                 if (panel) panel.classList.add('active');
+                if (t === 'data') loadDataset(document.getElementById('dsSelect').value);
             });
         }
 
@@ -378,6 +384,7 @@
                 var badge = document.getElementById('expCount');
                 if (!el) return;
                 if (err || !exps) { el.innerHTML = '<p>加载失败</p>'; return; }
+                if (!Array.isArray(exps)) { el.innerHTML = '<p>数据格式错误</p>'; return; }
                 if (badge) badge.textContent = exps.length ? '(' + exps.length + ')' : '';
                 el.innerHTML = '';
                 if (!exps.length) { el.innerHTML = '<p>暂无实验记录，运行训练或评估后将在此显示</p>'; return; }
@@ -416,16 +423,25 @@
         }
 
         function loadDataset(ds) {
-            httpGet(API + 'api/datasets', function(data, err) {
+            var el = document.getElementById('sceneList');
+            if (el) el.innerHTML = '<p class="loading">加载中...</p>';
+            var apiUrl = (typeof API_BASE !== 'undefined' ? API_BASE : API + 'api/') + 'datasets';
+            httpGet(apiUrl, function(data, err) {
                 var el = document.getElementById('sceneList');
                 var badge = document.getElementById('sceneCount');
                 if (!el) return;
-                if (err || !data) { el.innerHTML = '<p>加载失败</p>'; return; }
-                el.innerHTML = '';
-                var info = data[ds] || {};
+                if (err || !data) {
+                    el.innerHTML = '<p class="sub">加载失败: ' + (err || '无数据') + '。请检查网络或 API 路径。</p>';
+                    return;
+                }
+                var info = (data && data[ds]) || (data && data.gibson) || {};
                 var scenes = (info.train || []).concat(info.val || []).concat(info.scenes || []);
-                if (badge) badge.textContent = scenes.length ? '(' + scenes.length + ' scenes)' : '';
-                if (!scenes.length) { el.innerHTML = '<p>该数据集无可用场景</p>'; return; }
+                if (badge) badge.textContent = scenes.length ? '(' + scenes.length + ')' : '';
+                if (!scenes.length) {
+                    el.innerHTML = '<p class="sub">该数据集暂无场景列表。请确认 constants.py 中 scenes 已配置。</p>';
+                    return;
+                }
+                el.innerHTML = '';
                 for (var i = 0; i < scenes.length; i++) {
                     var d = document.createElement('div');
                     d.className = 'scene-item';
@@ -434,19 +450,26 @@
                 }
             });
 
-            httpGet(API + 'api/datasets/stats', function(stats, err) {
-                if (err || !stats) return;
+            var statsUrl = (typeof API_BASE !== 'undefined' ? API_BASE : API + 'api/') + 'datasets/stats';
+            httpGet(statsUrl, function(stats, err) {
                 var el = document.getElementById('catStatsText');
-                if (el) {
-                    var keys = Object.keys(stats);
-                    var html = '<div class="cat-grid">';
-                    for (var i = 0; i < keys.length; i++) {
-                        var k = keys[i], v = stats[k];
-                        html += '<span class="cat-tag">' + k + ' <b>' + (v.count || 0) + '</b></span>';
-                    }
-                    html += '</div>';
-                    el.innerHTML = html;
+                if (!el) return;
+                if (err || !stats) {
+                    el.innerHTML = '<p class="sub">完成评估后，物体类别统计将在此显示</p>';
+                    return;
                 }
+                var keys = Object.keys(stats);
+                if (!keys.length) {
+                    el.innerHTML = '<p class="sub">完成评估后，物体类别统计将在此显示</p>';
+                    return;
+                }
+                var html = '<div class="cat-grid">';
+                for (var i = 0; i < keys.length; i++) {
+                    var k = keys[i], v = stats[k];
+                    html += '<span class="cat-tag">' + k + ' <b>' + (v.count || 0) + '</b></span>';
+                }
+                html += '</div>';
+                el.innerHTML = html;
                 if (window._updateCatChart) window._updateCatChart(stats);
             });
         }
@@ -498,6 +521,10 @@
             if (goalSelect) goalSelect.addEventListener('change', setGoal);
             var dsSelect = document.getElementById('dsSelect');
             if (dsSelect) dsSelect.addEventListener('change', function() { loadDataset(this.value); });
+            var btnRefreshDataset = document.getElementById('btnRefreshDataset');
+            if (btnRefreshDataset) btnRefreshDataset.addEventListener('click', function() {
+                loadDataset(document.getElementById('dsSelect').value);
+            });
             var btnResetCam = document.getElementById('btnResetCam');
             if (btnResetCam) btnResetCam.addEventListener('click', function() { if (window._resetCamera) window._resetCamera(); });
             var viewMode = document.getElementById('viewMode');

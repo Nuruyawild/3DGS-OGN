@@ -140,6 +140,25 @@ body {
     display: grid;
     grid-template-columns: 1fr 380px;
     gap: 16px;
+    max-height: calc(100vh - 120px);
+    overflow: auto;
+}
+
+.nav-grid .card {
+    min-height: 0;
+    overflow: hidden;
+}
+
+#chartMetrics {
+    width: 400px !important;
+    height: 200px !important;
+    max-width: 100%;
+}
+
+#pathCanvas {
+    width: 350px !important;
+    height: 350px !important;
+    max-width: 100%;
 }
 
 .metrics-card .metrics-row {

@@ -36,6 +36,9 @@ def handle_exception(e):
 
 
 # ============ 共享状态 ============
+WEB_STATE_FILE = os.path.join(BASE_DIR, "tmp", "web_state.json")
+
+
 class AppState:
     def __init__(self):
         self.lock = threading.Lock()
@@ -47,6 +50,7 @@ class AppState:
         self.scene_graph = {"nodes": [], "edges": []}
         self.metrics = {"sr": 0, "spl": 0, "dtg": 0}
         self.semantic_info = {}
+        self.map_grid = []
 
     def update(self, data):
         with self.lock:
@@ -54,7 +58,26 @@ class AppState:
                 if hasattr(self, k):
                     setattr(self, k, v)
 
+    def _load_from_file(self):
+        """从 run_enhanced 写入的文件读取状态（训练/评估运行时）"""
+        try:
+            if os.path.exists(WEB_STATE_FILE):
+                with open(WEB_STATE_FILE) as f:
+                    d = json.load(f)
+                with self.lock:
+                    self.agent_position = d.get("agent_position", self.agent_position)
+                    self.agent_heading = d.get("agent_heading", self.agent_heading)
+                    self.path_history = d.get("path_history", [])
+                    self.gaussians = d.get("gaussians", [])
+                    self.scene_graph = d.get("scene_graph", self.scene_graph)
+                    self.metrics = d.get("metrics", self.metrics)
+                    self.semantic_info = d.get("semantic_info", {})
+                    self.map_grid = d.get("map_grid", [])
+        except Exception:
+            pass
+
     def get(self):
+        self._load_from_file()
         with self.lock:
             return {
                 "agent_position": self.agent_position,
@@ -65,6 +88,7 @@ class AppState:
                 "scene_graph": self.scene_graph,
                 "metrics": self.metrics,
                 "semantic_info": self.semantic_info,
+                "map_grid": self.map_grid,
             }
 
 
@@ -268,6 +292,10 @@ def api_jobs_models():
 def api_experiments():
     exps = []
     rd = os.path.join(BASE_DIR, "tmp", "dump")
+    try:
+        os.makedirs(rd, exist_ok=True)
+    except OSError:
+        pass
     if os.path.exists(rd):
         for name in sorted(os.listdir(rd)):
             p = os.path.join(rd, name)
@@ -314,10 +342,13 @@ def api_experiment_export(name):
 
 @app.route("/api/datasets")
 def api_datasets():
-    ds = {"gibson": {"train": scenes.get("train", []), "val": scenes.get("val", [])}}
-    mp = os.path.join(BASE_DIR, "data", "scene_datasets", "mp3d")
-    if os.path.exists(mp):
-        ds["mp3d"] = {"scenes": [x for x in os.listdir(mp) if os.path.isdir(os.path.join(mp, x))]}
+    try:
+        ds = {"gibson": {"train": list(scenes.get("train", [])), "val": list(scenes.get("val", []))}}
+        mp = os.path.join(BASE_DIR, "data", "scene_datasets", "mp3d")
+        if os.path.exists(mp):
+            ds["mp3d"] = {"scenes": [x for x in os.listdir(mp) if os.path.isdir(os.path.join(mp, x))]}
+    except Exception:
+        ds = {"gibson": {"train": [], "val": []}}
     return jsonify(ds)
 
 
@@ -326,12 +357,21 @@ def api_datasets_stats():
     stats = {k: {"id": v, "count": 0} for k, v in coco_categories.items()}
     rd = os.path.join(BASE_DIR, "tmp", "dump")
     if os.path.exists(rd):
-        for exp in os.listdir(rd):
-            for fp in glob.glob(os.path.join(rd, exp, "*_spl_per_cat*.json")):
-                with open(fp) as f:
-                    for k, vals in json.load(f).items():
-                        if k in stats:
-                            stats[k]["count"] += len(vals)
+        try:
+            for exp in os.listdir(rd):
+                exp_dir = os.path.join(rd, exp)
+                if not os.path.isdir(exp_dir):
+                    continue
+                for fp in glob.glob(os.path.join(exp_dir, "*_spl_per_cat*.json")):
+                    try:
+                        with open(fp) as f:
+                            for k, vals in json.load(f).items():
+                                if k in stats:
+                                    stats[k]["count"] += len(vals)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
     return jsonify(stats)
 
 

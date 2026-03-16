@@ -421,6 +421,10 @@ def main():
     saved_failure_count = 0
     failure_cases_for_comparison = []  # 存储失败案例用于改进前后对比
 
+    # --- Web app state: 供 Web 可视化读取 ---
+    web_state_path = os.path.join(args.dump_location, 'web_state.json')
+    web_path_history = []
+
     if save_figures:
         from utils.paper_figures import (
             save_trajectory_comparison,
@@ -541,6 +545,8 @@ def main():
                     scene_graph_builders[e].reset()
                 if gaussian_modules:
                     gaussian_modules[e].gaussians = None
+                if e == 0:
+                    web_path_history = []
 
         # Semantic Mapping
         poses = torch.from_numpy(np.asarray(
@@ -552,6 +558,57 @@ def main():
 
         locs = local_pose.cpu().numpy()
         planner_pose_inputs[:, :3] = locs + origins
+        # Web state: 累积 env 0 的路径
+        if num_scenes > 0 and not wait_env[0] and not finished[0]:
+            pos = planner_pose_inputs[0, :3].tolist()
+            web_path_history.append(pos)
+            if len(web_path_history) > 500:
+                web_path_history = web_path_history[-500:]
+
+        # --- 3DGS: 使用观测更新高斯表示（供 Web 可视化） ---
+        _obs_ok = False
+        if args.use_3dgs and gaussian_modules and obs is not None:
+            try:
+                if hasattr(obs, 'cpu'):
+                    _arr = obs.cpu().numpy()
+                else:
+                    _arr = np.asarray(obs)
+                _obs_ok = _arr.size > 0 and np.any(_arr != 0)
+            except Exception:
+                pass
+        if _obs_ok:
+            try:
+                if hasattr(obs, 'cpu'):
+                    obs_t = obs.float().to(device)
+                else:
+                    obs_t = torch.from_numpy(np.asarray(obs)).float().to(device)
+                if obs_t.dim() == 3:
+                    obs_t = obs_t.unsqueeze(0)
+                n_obs, c_obs, h_obs, w_obs = obs_t.shape
+                for e in range(min(n_obs, num_scenes)):
+                    if wait_env[e] or finished[e]:
+                        continue
+                    rgb = obs_t[e, 0:3].permute(1, 2, 0) / 255.0  # (H,W,3) 0-1
+                    depth = obs_t[e, 3]  # (H,W), 预处理后为 cm
+                    depth_m = depth / 100.0
+                    if c_obs >= 20:
+                        sem_pred = obs_t[e, 4:20].argmax(0).float()  # (H,W)
+                    else:
+                        sem_pred = torch.zeros(h_obs, w_obs, device=device)
+                    x, y, theta = planner_pose_inputs[e, 0].item(), planner_pose_inputs[e, 1].item(), planner_pose_inputs[e, 2].item()
+                    th_rad = np.deg2rad(theta)
+                    cos_t, sin_t = np.cos(th_rad), np.sin(th_rad)
+                    R = torch.tensor([
+                        [cos_t, -sin_t, 0, x],
+                        [sin_t, cos_t, 0, y],
+                        [0, 0, 1, args.camera_height],
+                        [0, 0, 0, 1]
+                    ], dtype=torch.float32, device=device)
+                    gaussian_modules[e].update_from_observation(
+                        depth_m, sem_pred, rgb, R, camera_K)
+            except Exception:
+                pass
+
         local_map[:, 2, :, :].fill_(0.)
         for e in range(num_scenes):
             r, c = locs[e, 1], locs[e, 0]
@@ -778,8 +835,107 @@ def main():
                             if gm.gaussians else 0 for gm in gaussian_modules]
                 log += "\n\t3DGS: avg {:.0f} Gaussians".format(np.mean(g_counts))
 
+            # --- 写入 Web 状态文件供可视化读取 ---
+            try:
+                g_list = []
+                if args.use_3dgs and gaussian_modules and gaussian_modules[0].gaussians is not None:
+                    gm = gaussian_modules[0].gaussians
+                    centers = gm.centers.cpu().numpy()
+                    colors = gm.colors.cpu().numpy()
+                    n = min(500, centers.shape[0])
+                    for i in range(n):
+                        g_list.append({
+                            'center': centers[i].tolist(),
+                            'color': colors[i].tolist() if colors.ndim > 1 else [0.5, 0.5, 0.5],
+                        })
+                sem_info = {}
+                map_grid = []  # 2D grid: 0=unexplored, 1=obstacle, 2-17=semantic 0-15
+                if num_scenes > 0:
+                    occ_map = full_map[0, 0].cpu().numpy()   # obstacle
+                    exp_map = full_map[0, 1].cpu().numpy()   # explored
+                    sem_map = full_map[0, 4:, :, :].argmax(0).cpu().numpy()
+                    h, w = sem_map.shape
+                    step = max(1, min(h, w) // 120)
+                    for r in range(0, min(h, 360), step):
+                        for c in range(0, min(w, 360), step):
+                            if exp_map[r, c] > 0.1:
+                                v = int(sem_map[r, c])
+                                sem_info['{}_{}'.format(r, c)] = v
+                    # 生成稠密 map_grid 供前端绘制场景背景 (96x96 下采样)
+                    ds = max(1, min(h, w) // 96)
+                    grid_h, grid_w = (h + ds - 1) // ds, (w + ds - 1) // ds
+                    for gr in range(grid_h):
+                        row = []
+                        for gc in range(grid_w):
+                            r, c = min(gr * ds, h - 1), min(gc * ds, w - 1)
+                            if exp_map[r, c] <= 0.1:
+                                row.append(0)
+                            elif occ_map[r, c] > 0.1:
+                                row.append(1)
+                            else:
+                                row.append(int(sem_map[r, c]) + 2)
+                        map_grid.append(row)
+                pos = planner_pose_inputs[0, :3].tolist() if num_scenes > 0 else [0, 0, 0]
+                heading = float(pos[2]) if len(pos) > 2 else 0.0
+                m = {'sr': 0, 'spl': 0, 'dtg': 0}
+                if args.eval:
+                    ts = []
+                    for e in range(args.num_processes):
+                        for x in episode_success[e]:
+                            ts.append(x)
+                    if ts:
+                        m['sr'] = float(np.mean(ts))
+                    tpl = []
+                    for e in range(args.num_processes):
+                        for x in episode_spl[e]:
+                            tpl.append(x)
+                    if tpl:
+                        m['spl'] = float(np.mean(tpl))
+                    td = []
+                    for e in range(args.num_processes):
+                        for x in episode_dist[e]:
+                            td.append(x)
+                    if td:
+                        m['dtg'] = float(np.mean(td))
+                else:
+                    if len(episode_success) > 0:
+                        m['sr'] = float(np.mean(episode_success))
+                    if len(episode_spl) > 0:
+                        m['spl'] = float(np.mean(episode_spl))
+                    if len(episode_dist) > 0:
+                        m['dtg'] = float(np.mean(episode_dist))
+                ws = {
+                    'agent_position': pos[:3],
+                    'agent_heading': heading,
+                    'path_history': list(web_path_history),
+                    'gaussians': g_list,
+                    'semantic_info': sem_info,
+                    'map_grid': map_grid,
+                    'scene_graph': {'nodes': [], 'edges': []},
+                    'metrics': m,
+                }
+                with open(web_state_path, 'w') as f:
+                    json.dump(ws, f, indent=None)
+            except Exception as ex:
+                pass  # 静默忽略，不影响主流程
+
             print(log)
             logging.info(log)
+
+        # 训练时定期保存指标供 Web 实验管理显示
+        if not args.eval and len(episode_success) >= 10 and step % args.log_interval == 0:
+            try:
+                train_metrics = {
+                    'success': float(np.mean(episode_success)),
+                    'spl': float(np.mean(episode_spl)),
+                    'dtg': float(np.mean(episode_dist)),
+                    'num_episodes': len(episode_spl),
+                    'use_3dgs': args.use_3dgs,
+                }
+                with open(os.path.join(dump_dir, 'enhanced_metrics.json'), 'w') as f:
+                    json.dump(train_metrics, f, indent=2)
+            except Exception:
+                pass
 
         # Save models
         if (step * num_scenes) % args.save_interval < num_scenes:
